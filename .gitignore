@@ -13,3 +13,7 @@ screen*.png
 *.apk
 *.idsig
 *.jks
+
+# python
+__pycache__/
+*.pyc

@@ -190,3 +190,64 @@ MD5/SHA1 over the GlobalSign / `*.amap.com` cert chain. Must bypass for mitm.
 - `recon.js` — readable v3 hook source (sign tracer + Cipher.init key dump + okhttp)
 - `recon.entry.js` — frida-compile entry (adds Java-bridge import); → `recon.bundle.js`
 - `run_recon.py` — spawn+inject driver (handles `log` messages, stays alive to drive UI)
+
+---
+
+# SIGNING ORACLE — solved, sign reproduced offline (2026-07-06)
+
+Attached an RPC oracle (`oracle.entry.js` → `oracle.bundle.js`, driver
+`run_oracle.py`) to the live process and enumerated the AOS crypto surface.
+
+## serverkey (com.autonavi.server.aos.serverkey) — native, libserverkey.so
+Key methods:
+- `String sign(byte[])`            — **plain uppercase MD5** of the input (no salt inside)
+- `String amapEncode(String)` / `amapEncodeV2` / `amapDecode` / `amapDecodeV2`
+                                   — the reversible `in=` param codec (DES + base64)
+- `byte[] amapEncodeBinary(byte[])`, `amapEncodeBinaryV2`
+- `String getAosKey()`             — returns the sign salt (below)
+- `String getSpm(s,s,s,s,s)`, `getAosChannel()`, plus per-partner keys
+  (`getWXSecret`, `getQQSecret`, `getTaobaoSecret`, `get360Secret`, …)
+- `String getVersion()` → `16.08.0.1`
+
+## AosEncryptor (com.amap.bundle.network.context.AosEncryptor)
+- `String sign(byte[])`, `HashMap virtualV2Sign(String,String,String,boolean)` /
+  `virtualV2Sign(byte[],…)` — returns the header bundle (sign + wua)
+- `String getWua()`, `getMiniWua()`, `getUMID()`, `xxTeaEncrypt(String/byte[])`,
+  `whiteBoxSign(String[])`, `withSecurityGuardSign()`, `isVirtualV2Sign()`
+
+## THE SIGN (verified offline, no device)
+```
+aosKey = "xnaEwInMxaMQ2m0cw6Y1bDm7ns0YVxYS9v7JlC8I"     # = serverkey.getAosKey()
+sign   = md5( signString + "@" + aosKey ).hexdigest()   # serverkey.sign() itself is just md5
+```
+Proof: `md5("amap7aANDH161900@"+aosKey)` = `f055c7aa08fb6418f22c08037e3b8be7`
+== the value captured in live traffic. `serverkey.sign(b"hello")` =
+`5D41402ABC4B2A76B9719D911017C592` = uppercase md5("hello"). => the caller assembles
+`<params>@<aosKey>`, then MD5. **Fully reproducible in pure python.**
+
+## The `in=` codec
+`amapEncode(json)` ⇄ `amapDecode(blob)` round-trips exactly (base64 body). Same
+output as `amapEncodeV2`. Uses the rotating 8-byte DES keys captured earlier
+(IV `0102030405060708`). Two ways to build `in=` for a forged request:
+1. Oracle-as-backend: call `rpc amapencode(json)` on the device (works now).
+2. Offline: port DES/CBC/PKCS5 with the captured key + the key-selection logic
+   (TODO: confirm which key index maps to which endpoint).
+
+## Oracle usage
+```
+cd compile && npm i frida-java-bridge
+frida-compile ../oracle.entry.js -o ../oracle.bundle.js
+python3 run_oracle.py oracle.bundle.js $(adb shell pidof com.autonavi.minimap)
+# rpc.exports: sign(str), amapencode(str), amapdecode(str), aoskey(), version()
+```
+
+## Remaining to "call 打车 API directly"
+- Forge one `/ws/boss/car/order/*` request: build param JSON → `in=`(amapEncode) →
+  sign → `?ent=2&in=…&csid=<uuid>` → POST. Compare response to the live app.
+- Need the exact per-request param schema for the car endpoints (drive the booking
+  flow with recon attached to capture the plaintext + which headers/params are required).
+- For unattended offline use: port `amapEncode` (DES) to python; sign is already offline.
+
+## New oracle files (this repo)
+- `oracle.entry.js` — RPC crypto oracle (sign / amapEncode / amapDecode / aosKey)
+- `run_oracle.py`   — attach-by-pid driver; enumerates surface + runs verification signs

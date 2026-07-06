@@ -251,3 +251,60 @@ python3 run_oracle.py oracle.bundle.js $(adb shell pidof com.autonavi.minimap)
 ## New oracle files (this repo)
 - `oracle.entry.js` — RPC crypto oracle (sign / amapEncode / amapDecode / aosKey)
 - `run_oracle.py`   — attach-by-pid driver; enumerates surface + runs verification signs
+
+---
+
+# 顺风车 (hitch) ORDER LIST — captured & refreshable (2026-07-06)
+
+Goal: read the logged-in user's active shared-ride (顺风车 driver) order list.
+Done. (Own-account self-access; live cookies/PII kept on disk, never committed.)
+
+## Why the earlier hooks were blind
+顺风车 list is **Ajx3-native** — Amap's RN-like framework: native views, JS logic,
+and its data network is NOT okhttp3 / `com.android.okhttp` / WebView. So:
+- native AOS codec tap (amapEncode/Decode): 0 order hits
+- `com.android.okhttp` + `okhttp3` hooks: 0 hits
+- Chrome DevTools (enabled via frida `WebView.setWebContentsDebuggingEnabled` on the
+  UI thread): 0 targets — confirms it is NOT a WebView/H5.
+
+## The Ajx3 network layer (Java-side — no mitm/reboot needed)
+`com.autonavi.minimap.ajx3.modules.net.ModuleRequest`:
+- `void fetch(String key, String optionsJson, JsFunctionCallback cb)`  — request out
+- `void binaryFetch(String, String, JsFunctionCallback)`
+- `notifyJs(cb, int, int, [long,] int, String, String)`                — response to JS
+- inner `ModuleRequest$AjxCallback.onSuccess(AosResponse)` / `onFailure(...)`
+`optionsJson` keys: `url, method, headers, timeout, async, csid, bodytransfer,
+aosSign, wua, body`. So the request already carries `aosSign` (our cracked
+`MD5(str+"@"+aosKey)`) and `wua`; the native layer adds cookie/ent and sends it.
+
+## Endpoint
+```
+POST  m5-zb.amap.com/ws/amap/hitch/driver/travel/recommend_order_list
+body  application/x-www-form-urlencoded (PLAINTEXT): adcode=<city>&appChannel=…   (~408B)
+```
+Related poller seen on the same screen:
+`POST /ws/boss/order/before/departure/passenger/location` (location heartbeat).
+
+## Response shape (values redacted)
+```
+{ code:int, message:str, result:bool, timestamp:int, version:str,
+  data: { orderList:[N],            # the shared-ride orders (N=10 observed)
+          filterLists:[5], haveNextPage:bool, rcmdBatchId:str,
+          displayTrafficRestrictionsFilter:bool } }
+```
+Refresh = re-fire the endpoint (UI 刷新 or replay) → fresh `orderList` + new batch.
+Verified repeatable (two captures, distinct timestamps, 10 orders each).
+
+## Capture tooling (this repo — code only; captures are gitignored)
+- `sfnet.entry.js` / `run_sfnet.py` — tap `ModuleRequest.fetch`+`notifyJs`; full
+  req/resp → disk (`sf_net.jsonl`), stdout shows only host/path + response keys.
+- `netscan.entry.js` — enumerate loaded network/webview/bridge classes.
+- `tap.entry.js` / `run_tap.py`   — decrypted AOS param tap (amapEncode/Decode) +
+  HTTP; used to catch the passport login flow.
+- `sftap.entry.js` / `run_sftap.py` — okhttp3 request capture (ruled okhttp out here).
+
+## Remaining: standalone puller (TODO, not built)
+Two builds — (a) frida-drive `ModuleRequest.fetch` with fresh csid (reuses live
+session + crypto; robust), or (b) pure-HTTP replay (map `aosSign`→wire header +
+session cookie + `wua`, POST the form body). Body is plaintext, sign is offline —
+(b) is feasible once the wire header/cookie mapping is pinned.

@@ -1,5 +1,15 @@
+# build artifacts
 node_modules/
-recon.bundle.js
-recon.log
+*.bundle.js
+
+# --- captures / secrets — NEVER commit (live session cookies, PII, order data) ---
+*.log
+*.jsonl
+capture.log
+sf_net.jsonl
+sf_requests.jsonl
+.sfpid
+screen*.png
 *.apk
 *.idsig
+*.jks

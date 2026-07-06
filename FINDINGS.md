@@ -110,3 +110,83 @@ Once frida attaches (option 1-3), the plan:
 - `runbook.md` — original step plan
 - `smali_out/` — apktool-decoded smali of base.apk (searchable)
 - `debug.jks` — our signing key (pass: android)
+
+---
+
+# BREAKTHROUGH — protocol recovered (2026-07-06)
+
+## Wall broken
+Rooted **Redmi Note 8 (ginkgo)**, arm64-v8a, Android 11 (SDK 30), Magisk 28.1.
+Path that worked (Resume option 1):
+1. `pm install` the **unmodified** `base.apk` **as root** — MIUI blocks plain
+   `adb install` (`INSTALL_FAILED_USER_RESTRICTED`); `su -c 'pm install -r -g ...'`
+   bypasses it. Valid Amap signature → SecurityGuard inits → **no CpuArchError**.
+2. Host frida **17.15.3**; pushed matching `frida-server-17.15.3-android-arm64` to
+   `/data/local/tmp/fs17`, ran as root.
+3. `python3 run_recon.py` → spawn + inject `recon.bundle.js` (see toolchain note).
+
+### frida 17 gotcha
+`Java` / `ObjC` are **no longer globals**. A raw `-l script.js` throws
+`ReferenceError: 'Java' is not defined`. Fix: bundle with `frida-compile` +
+`npm i frida-java-bridge`, entry does `import Java from 'frida-java-bridge';
+globalThis.Java = Java;`. Source = `recon.entry.js`, compiled → `recon.bundle.js`.
+`console.log` in the script arrives to frida-python as message type **`log`**
+(not `send`); `run_recon.py` handles it.
+
+## AOS request format (all api.amap.com "ws" endpoints)
+```
+POST https://<host>/ws/<path>?ent=2&in=<params>&csid=<uuid>
+  <host> e.g. m5-zb.amap.com, center.amap.com, render.amap.com, amap-aos-info-nogw.amap.com
+  in    = URL-encoded base64 of the DES-encrypted param body (the "in" blob)
+  csid  = per-request UUID
+headers: Ap-Tid: <uid3>, Content-Type: application/x-www-form-urlencoded, ...
+```
+**打车 (ride-hailing) module confirmed live:** `POST https://m5-zb.amap.com/ws/boss/car/order/lottie_info?ent=2&in=...&csid=...`
+→ target path prefix is **`/ws/boss/car/...`**.
+
+## Signing algorithm (the `sign` field)
+Native, but reachable from Java. Call chain (Frida stack):
+```
+com.amap.bundle.aosservice.request.AosRequest.buildHttpRequest:454
+ └ com.amap.bundle.network.context.AosEncryptor.sign
+    └ com.autonavi.server.aos.serverkey.sign          (Java static — CALL THIS)
+       └ com.autonavi.jni.server.aos.ServerkeyNative.sign   [native, libserverkey.so]
+          → MD5( "amap" + "7a" + <paramDigest> + SALT )
+SALT = "@xnaEwInMxaMQ2m0cw6Y1bDm7ns0YVxYS9v7JlC8I"   (app secret, embedded)
+```
+Observed inputs → outputs:
+- `amap7aANDH161900@xna…JlC8I` → `f055c7aa08fb6418f22c08037e3b8be7`
+- `amap7avae8f5794f442dcb9hhci3d5348d58@xna…JlC8I` → `5b2c91c872b98c09d558a29af67ec58f`
+
+`spm` uses a separate `MD5Util.getStringMD5` via `ServerkeyNative.getSpm` (tracking, not the API sign).
+
+## Body / param crypto (captured via Cipher.init)
+| Purpose | Alg | Key (ascii) | IV |
+|---|---|---|---|
+| `in=` param body | DES/CBC/PKCS5 | rotating 8-byte: `0jof8eg3`,`8f31d352`,`k88upxsy`,`ri40hsah`,`u2xsyyet`,`4n1z6vlc` | `0102030405060708` (or `lvain81q`) |
+| some payloads | DESede/CBC/NoPadding | `0461d813b88c9261dc598d08` | `00000000` |
+| adiu device-id | AES/CBC/PKCS5 | `amapadiu`×4 (32B) | all-zero |
+| DES key transport | RSA/ECB/PKCS1 | (server pubkey) | — |
+
+Plaintext param bodies were dumped pre-encryption, e.g.:
+`{"app":"com.autonavi.minimap","uid":"…","appver":"16.19.0.2012",…}` and the
+analytics `{"dur":0,"pv":20240428,"dtype":"qt","ts":"…","uuid":"…","ks":"…","aid":"…"}`.
+
+## Pinning
+Cert pinning present at **both** layers: `com.android.okhttp.CertificatePinner`
+(okhttp is the AOSP-bundled `com.android.okhttp`, **not** `okhttp3`) + native
+MD5/SHA1 over the GlobalSign / `*.amap.com` cert chain. Must bypass for mitm.
+
+## Next steps (pick)
+1. **Signing oracle via Frida RPC** — `rpc.exports = { sign: s => serverkey.sign(s),
+   encparam: … }`; forge params off-device, let the app sign/encrypt. Fastest route
+   to "call their API directly." (No native RE needed.)
+2. **Drive the 打车 booking flow** on-device with recon attached → capture the full
+   `/ws/boss/car/order/*` request+response set (estimate price, create order).
+3. **mitm decrypt** — proxy → `192.168.100.44:8080`, bypass okhttp+native pinning via
+   Frida, decrypt `in=` with the DES keys above to read/replay live traffic.
+
+## New files (this repo)
+- `recon.js` — readable v3 hook source (sign tracer + Cipher.init key dump + okhttp)
+- `recon.entry.js` — frida-compile entry (adds Java-bridge import); → `recon.bundle.js`
+- `run_recon.py` — spawn+inject driver (handles `log` messages, stays alive to drive UI)

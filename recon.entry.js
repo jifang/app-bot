@@ -1,26 +1,6 @@
-/*
- * recon.js (v3) — readable hook source for Amap AOS RE.
- *
- * frida 17 removed the `Java` / `ObjC` globals, so this file cannot be run with a
- * bare `frida -l recon.js` — it needs the Java bridge. Build the runnable bundle:
- *
- *   cd compile && npm i frida-java-bridge
- *   frida-compile recon.entry.js -o recon.bundle.js     # recon.entry.js = this body + bridge import
- *   python3 run_recon.py com.autonavi.minimap recon.bundle.js recon.log
- *
- * (recon.entry.js is this exact logic prefixed with:
- *    import Java from 'frida-java-bridge'; globalThis.Java = Java; )
- *
- * What it dumps:
- *   [SIGN.in]/[SIGN.out] — the AOS sign MD5 (serverkey.sign), with a caller stack
- *                          the first few times so you can locate the signer.
- *   [Cipher.init]        — DES/3DES/AES/RSA key + IV (the `in=` param crypto).
- *   [Cipher:*]           — plaintext param bodies before encryption.
- *   [HTTP]               — com.android.okhttp requests to *.amap.com (endpoint + headers).
- *
- * Findings this produced live in FINDINGS.md (§ BREAKTHROUGH 2026-07-06).
- */
-'use strict';
+// entry.js (recon v2) — frida 17: Java bridge required explicitly.
+import Java from 'frida-java-bridge';
+globalThis.Java = Java;
 
 function hex(arr) {
   if (!arr) return '(null)';
@@ -31,7 +11,7 @@ function hex(arr) {
 function str(arr) {
   try { return Java.use('java.lang.String').$new(arr); } catch (e) { return hex(arr); }
 }
-// printable-ASCII heuristic: keep sign strings, drop DER certs / binary noise
+// printable-ASCII heuristic: keep sign strings, drop DER certs / binary
 function isText(arr) {
   if (!arr) return false;
   var b = Java.array('byte', arr);
@@ -51,7 +31,7 @@ function stack() {
 }
 
 Java.perform(function () {
-  // ---- MessageDigest: the sign primitive (MD5) ----
+  // ---- MessageDigest: the sign primitive (MD5/SHA1) ----
   var MD = Java.use('java.security.MessageDigest');
   var marked = {};      // instance hashCode -> true when a sign-marker string was fed
   var stacksLeft = 6;   // stack-trace budget for genuine sign calls only
@@ -76,28 +56,31 @@ Java.perform(function () {
     return out;
   };
 
-  // ---- Cipher.init: grab DES/3DES/AES/RSA key + IV ----
+  // ---- Cipher.init: grab DES/RSA key + IV ----
   var Cipher = Java.use('javax.crypto.Cipher');
   var SecretKeySpec = Java.use('javax.crypto.spec.SecretKeySpec');
   var IvParameterSpec = Java.use('javax.crypto.spec.IvParameterSpec');
-  function dumpKey(cipher, mode, key, spec) {
-    try {
-      var line = '[Cipher.init ' + cipher.getAlgorithm() + '] mode=' + mode;
-      try { var sk = Java.cast(key, SecretKeySpec);
-        line += ' KEY.hex=' + hex(sk.getEncoded()) + ' KEY.str=' + str(sk.getEncoded()); } catch (e) {}
-      if (spec !== null) {
-        try { var iv = Java.cast(spec, IvParameterSpec); line += ' IV.hex=' + hex(iv.getIV()); } catch (e) {}
-      }
-      console.log(line);
-    } catch (e) { console.log('[Cipher.init] err ' + e); }
-  }
   Cipher.init.overload('int', 'java.security.Key').implementation = function (m, k) {
     dumpKey(this, m, k, null); return this.init(m, k);
   };
   Cipher.init.overload('int', 'java.security.Key', 'java.security.spec.AlgorithmParameterSpec')
     .implementation = function (m, k, p) { dumpKey(this, m, k, p); return this.init(m, k, p); };
+  function dumpKey(cipher, mode, key, spec) {
+    try {
+      var line = '[Cipher.init ' + cipher.getAlgorithm() + '] mode=' + mode;
+      if (Java.cast) {
+        try { var sk = Java.cast(key, SecretKeySpec);
+          line += ' KEY.hex=' + hex(sk.getEncoded()) + ' KEY.str=' + str(sk.getEncoded()); } catch (e) {}
+      }
+      if (spec !== null) {
+        try { var iv = Java.cast(spec, IvParameterSpec);
+          line += ' IV.hex=' + hex(iv.getIV()); } catch (e) {}
+      }
+      console.log(line);
+    } catch (e) { console.log('[Cipher.init] err ' + e); }
+  }
 
-  // ---- Cipher.doFinal: plaintext <-> ciphertext ----
+  // ---- Cipher.doFinal: plaintext<->ciphertext ----
   Cipher.doFinal.overload('[B').implementation = function (input) {
     var out = this.doFinal(input);
     var alg = this.getAlgorithm();
@@ -134,5 +117,5 @@ Java.perform(function () {
     console.log('[*] hooked com.android.okhttp.Request$Builder');
   } catch (e) { console.log('[okhttp] hook failed: ' + e); }
 
-  console.log('[*] recon v3 hooks installed');
+  console.log('[*] recon v2 hooks installed');
 });

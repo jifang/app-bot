@@ -1,0 +1,12 @@
+{
+  "name": "recon-compile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "frida-compile deps for recon.entry.js -> recon.bundle.js",
+  "scripts": {
+    "build": "frida-compile ../recon.entry.js -o ../recon.bundle.js"
+  },
+  "dependencies": {
+    "frida-java-bridge": "*"
+  }
+}

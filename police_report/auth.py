@@ -33,15 +33,91 @@ the sign + gsid are available.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
-import time
+import tempfile
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
-MGOP_URL = "https://mapi-jcss.police.hangzhou.gov.cn/app/mgop"
+MGOP_HOST = "mapi-jcss.police.hangzhou.gov.cn"
+MGOP_PATH = "/app/mgop"
+MGOP_URL = f"https://{MGOP_HOST}{MGOP_PATH}"
+
+TOKEN_PATH = os.path.join(os.path.dirname(__file__), ".token.json")
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+
+def decode_exp(token: str) -> Optional[int]:
+    """Return the JWT `exp` (epoch seconds) or None if it can't be decoded."""
+    try:
+        pad = lambda s: s + "=" * (-len(s) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(pad(token.split(".")[1])))
+        return payload.get("exp")
+    except Exception:
+        return None
+
+
+def _atomic_write(path: str, data: str, mode: int = 0o600) -> None:
+    """Write `data` to `path` atomically with the given mode (default 0600),
+    so a reader never sees a half-written secret and permissions are enforced."""
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".swp")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save_token(token: str, cna: str = "", *,
+               token_path: str = TOKEN_PATH, env_path: str = ENV_PATH) -> None:
+    """One authoritative, atomic (0600) persistence for the x-token.
+
+    Writes `.token.json` AND updates `WFJB_X_TOKEN` in `.env` (adding the line if
+    absent). Both are updated together so `cli refresh` and the CLI's env lookup
+    can never diverge — the shadowing bug where `.env` kept an expired token.
+    Preserves the existing `cna` when one isn't supplied.
+    """
+    if not cna and os.path.isfile(token_path):
+        try:
+            cna = json.load(open(token_path, encoding="utf-8")).get("cna", "")
+        except (ValueError, OSError):
+            cna = ""
+    _atomic_write(token_path, json.dumps(
+        {"x_token": token, "cna": cna, "exp": decode_exp(token)}, indent=2))
+    if os.path.isfile(env_path):
+        env = open(env_path, encoding="utf-8").read()
+        if re.search(r"^WFJB_X_TOKEN=", env, flags=re.M):
+            env = re.sub(r"^WFJB_X_TOKEN=.*$", f"WFJB_X_TOKEN={token}", env, flags=re.M)
+        else:
+            if env and not env.endswith("\n"):
+                env += "\n"
+            env += f"WFJB_X_TOKEN={token}\n"
+        _atomic_write(env_path, env)
+
+
+def validate_mgop_url(url: str) -> None:
+    """Reject a replay URL that isn't the exact HTTPS MGOP auth endpoint.
+
+    A replay template controls the destination the captured session headers are
+    POSTed to; a poisoned capture/template must not be able to exfiltrate them to
+    another host. Called before persisting a template and before every replay.
+    """
+    u = urlparse(url)
+    if u.scheme != "https" or u.hostname != MGOP_HOST or u.path != MGOP_PATH:
+        raise RuntimeError(
+            f"refusing replay to unexpected endpoint {url!r}; "
+            f"expected https://{MGOP_HOST}{MGOP_PATH}")
 
 
 def mgop_auth(*, gsid: str, sign: str, ts: int,
@@ -97,61 +173,41 @@ def save_replay_template(jsonl_path: str, out_path: str = REPLAY_PATH) -> bool:
             continue
         hdrs = {k.lower(): v for k, v in rec.get("req_headers", {}).items()}
         if "wfjb.auth" in hdrs.get("api", ""):
+            url = "https://" + rec["host"] + rec["path"]
+            validate_mgop_url(url)   # never persist a template that points elsewhere
             tpl = {
-                "url": "https://" + rec["host"] + rec["path"],
+                "url": url,
                 "headers": rec["req_headers"],
                 "body_hex": rec.get("req_body_b64", ""),
             }
     if not tpl:
         return False
-    json.dump(tpl, open(out_path, "w"), indent=2)
+    _atomic_write(out_path, json.dumps(tpl, indent=2))
     return True
 
 
 def refresh_token(replay_path: str = REPLAY_PATH) -> str:
     """
-    Replay the saved wfjb.auth template -> a fresh `x-token` JWT. Raises if the
-    template is missing or the backend declines (e.g. the portal session finally
-    expired — then a new capture is needed). Does not need the app or a proxy.
+    Replay the saved wfjb.auth template -> a fresh `x-token` JWT, persisting it.
+    Thin wrapper over TokenProvider (the single replay+classify+persist path);
+    raises RuntimeError with the classified outcome on failure. Does not need the
+    app or a proxy. Sibling state (.token.json/.env/state/lock) lives next to the
+    replay template so a custom path stays self-contained.
     """
-    if not os.path.isfile(replay_path):
-        raise RuntimeError(
-            f"no replay template at {replay_path}. Capture one first with "
-            f"`save_replay_template(<mitm.jsonl>)` while logged in."
-        )
-    tpl = json.load(open(replay_path, encoding="utf-8"))
-    hdrs = {k: v for k, v in tpl["headers"].items()
-            if k.lower() not in ("content-length", "host", "accept-encoding")}
-    body = bytes.fromhex(tpl["body_hex"]) if tpl.get("body_hex") else b""
+    from .token_provider import RefreshOutcome, TokenProvider
 
-    # The mgop gateway throttles rapid identical replays with an empty 200 body.
-    # Retry a few times with backoff before giving up.
-    last = ""
-    for attempt in range(4):
-        resp = requests.post(tpl["url"], headers=hdrs, data=body, timeout=30)
-        if resp.content:
-            try:
-                j = resp.json()
-            except ValueError:
-                last = f"non-JSON {resp.status_code}: {resp.text[:120]}"
-            else:
-                tok = (j.get("data") or {}).get("token")
-                if j.get("code") == 200 and tok:
-                    return tok
-                if j.get("code") != 200:
-                    raise RuntimeError(
-                        f"refresh declined: code={j.get('code')} msg={j.get('msg')}. "
-                        f"Portal session may have expired — re-capture needed."
-                    )
-                last = "200 but no token"
-        else:
-            last = f"empty {resp.status_code} body (gateway throttling)"
-        if attempt < 3:
-            time.sleep(2 * (attempt + 1))
-    raise RuntimeError(
-        f"refresh failed after retries: {last}. The existing token may still be "
-        f"valid; wait a bit and retry, or re-capture if the session expired."
+    base = os.path.dirname(replay_path) or "."
+    provider = TokenProvider(
+        replay_path=replay_path,
+        token_path=os.path.join(base, ".token.json"),
+        env_path=os.path.join(base, ".env"),
+        lock_path=os.path.join(base, ".token.lock"),
+        state_path=os.path.join(base, ".token_state.json"),
     )
+    res = provider.refresh(force=True)
+    if res.outcome is RefreshOutcome.OK and res.token:
+        return res.token
+    raise RuntimeError(f"{res.outcome.value}: {res.detail}")
 
 
 def get_token_from_mitm(jsonl_path: str) -> Optional[tuple[str, str]]:

@@ -9,6 +9,14 @@ node_modules/
 police_report/.token.json
 .auth_replay.json
 police_report/.auth_replay.json
+.session.json
+police_report/.session.json
+.token_expired
+police_report/.token_expired
+.token_state.json
+police_report/.token_state.json
+.token.lock
+police_report/.token.lock
 .env
 .env.*
 police_report/.env

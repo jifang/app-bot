@@ -17,14 +17,18 @@ import base64
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 import requests
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from .auth import _atomic_write
+
 BASE = "https://portal-jcss.police.hangzhou.gov.cn"
+SESSION_PATH = os.path.join(os.path.dirname(__file__), ".session.json")
+TIMEOUT = 20   # every portal call is bounded; the SSO endpoints can hang otherwise
 
 GUC_HEADERS = {
     "guc-platform": "app",
@@ -59,6 +63,7 @@ def _get_pubkey(s: requests.Session) -> str:
         f"{BASE}/uc/login/publicKey",
         params={"__noCache__": int(time.time() * 1000)},
         headers={k: v for k, v in GUC_HEADERS.items() if k != "Content-Type"},
+        timeout=TIMEOUT,
     )
     r.raise_for_status()
     return r.json()["data"]
@@ -74,7 +79,7 @@ def _send_otp(s: requests.Session, phone: str, pubkey_pem: str) -> None:
     }
     r = s.post(f"{BASE}/uc/verify/sendCodeEncrypt",
                headers={k: v for k, v in GUC_HEADERS.items() if k != "User-Agent"},
-               data=json.dumps(body))
+               data=json.dumps(body), timeout=TIMEOUT)
     r.raise_for_status()
     j = r.json()
     if not j.get("success"):
@@ -97,7 +102,7 @@ def _do_login(s: requests.Session, phone: str, sms_code: str,
     }
     r = s.post(f"{BASE}/uc/login",
                headers={k: v for k, v in GUC_HEADERS.items() if k != "User-Agent"},
-               data=json.dumps(body))
+               data=json.dumps(body), timeout=TIMEOUT)
     r.raise_for_status()
     j = r.json()
     if not j.get("success"):
@@ -108,7 +113,7 @@ def _do_login(s: requests.Session, phone: str, sms_code: str,
 def _get_auth_code(s: requests.Session, gsid: str) -> str:
     r = s.post(f"{BASE}/app_api/user/getAuthCode",
                headers={k: v for k, v in GUC_HEADERS.items() if k != "User-Agent"},
-               data=json.dumps({"token": gsid}))
+               data=json.dumps({"token": gsid}), timeout=TIMEOUT)
     r.raise_for_status()
     j = r.json()
     if not j.get("success"):
@@ -119,7 +124,7 @@ def _get_auth_code(s: requests.Session, gsid: str) -> str:
 def _person_login(s: requests.Session, auth_code: str) -> str:
     r = s.post(f"{BASE}/portal/person/authCodeLogin",
                headers={k: v for k, v in GUC_HEADERS.items() if k != "User-Agent"},
-               data=json.dumps({"authCode": auth_code}))
+               data=json.dumps({"authCode": auth_code}), timeout=TIMEOUT)
     r.raise_for_status()
     j = r.json()
     if not j.get("success"):
@@ -132,13 +137,15 @@ class LoginResult:
     main_gsid: str
     person_gsid: str
     user_name: str
+    access_token: str
     refresh_token: str
     auth_code: str
 
 
 def login_full(phone: str, sms_code: str,
                device_id: Optional[str] = None) -> LoginResult:
-    """One-shot: send OTP was already done; you supply code. Returns both gsids."""
+    """One-shot: send OTP was already done; you supply code. Returns both gsids
+    plus the access/refresh tokens (previously dropped)."""
     if device_id:
         global DEVICE_ID
         DEVICE_ID = device_id
@@ -150,10 +157,31 @@ def login_full(phone: str, sms_code: str,
     return LoginResult(
         main_gsid=main["gsid"],
         person_gsid=person,
-        user_name=main["userName"],
-        refresh_token=main["refreshToken"],
+        user_name=main.get("userName", ""),
+        access_token=main.get("accessToken", ""),
+        refresh_token=main.get("refreshToken", ""),
         auth_code=code,
     )
+
+
+def save_session(r: LoginResult, path: str = SESSION_PATH) -> None:
+    """Persist the login result atomically (0600). `person_gsid` is the session
+    the mgop wfjb.auth replay signs against; the access/refresh tokens are kept
+    for the eventual portal-refresh path. NOTE: this does not by itself mint an
+    x-token — the mgop `sign` (native SDK) is still required to rebuild a replay
+    template from a fresh gsid (see auth.py)."""
+    payload = dict(asdict(r))
+    payload["saved_at"] = int(time.time())
+    _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def load_session(path: str = SESSION_PATH) -> Optional[dict]:
+    if not os.path.isfile(path):
+        return None
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
 
 
 def request_otp(phone: str) -> str:
@@ -172,6 +200,8 @@ if __name__ == "__main__":
         phone = sys.argv[1]
         sms = sys.argv[2]
         r = login_full(phone, sms)
-        print(json.dumps(r.__dict__, ensure_ascii=False, indent=2))
+        save_session(r)
+        print(json.dumps(asdict(r), ensure_ascii=False, indent=2))
+        print(f"session saved -> {SESSION_PATH}")
     else:
         print("usage: python -m police_report.portal_login <phone> <sms_code>")

@@ -10,7 +10,7 @@ from __future__ import annotations
 import mimetypes
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -85,11 +85,14 @@ class ViolationReport:
 
 class WfjbClient:
     def __init__(self, x_token: str, cna_cookie: str = "", base: str = BASE,
-                 timeout: int = 60):
+                 timeout: int = 60, provider=None):
         if not x_token:
             raise ValueError("x_token is required (see auth.py / README for how to get one)")
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # Optional TokenProvider: reads refresh-and-retry once through it; submit
+        # refreshes through it *before* posting. Left None for one-shot/manual use.
+        self.provider = provider
         self.s = requests.Session()
         self.s.headers.update({
             "User-Agent": _UA,
@@ -102,11 +105,33 @@ class WfjbClient:
         if cna_cookie:
             self.s.headers["Cookie"] = f"cna={cna_cookie}"
 
+    def _set_token(self, token: str) -> None:
+        self.s.headers["X-Token"] = token
+
+    def _refresh_before(self, min_ttl_s: int = 600) -> None:
+        """Swap in a token that is fresh enough, refreshing via the provider if
+        needed. Used before a submit — no post-response retry is ever attempted."""
+        if self.provider:
+            self._set_token(self.provider.get_token(min_ttl_s=min_ttl_s))
+
     # ---- low level ----
     def _get(self, path: str, **kw) -> dict:
-        return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
+        """GET an idempotent read. On failure, refresh once via the provider and
+        retry exactly once (safe: reads are idempotent)."""
+        try:
+            return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
+        except WfjbError:
+            if not self.provider:
+                raise
+            res = self.provider.refresh(force=True)
+            if not res.token:               # refresh couldn't help — surface original class
+                raise
+            self._set_token(res.token)
+            return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
 
     def _post(self, path: str, **kw) -> dict:
+        # No automatic retry here: _post backs submit_report, where a blind retry
+        # after an ambiguous response could file a duplicate real report.
         return self._unwrap(self.s.post(self.base + path, timeout=self.timeout, **kw))
 
     @staticmethod
@@ -154,6 +179,7 @@ class WfjbClient:
             raise FileNotFoundError(path)
         ct = mimetypes.guess_type(path)[0] or default_ct
         fname = os.path.basename(path)
+        self._refresh_before()      # a stale token here just wastes an upload; refresh first
         with open(path, "rb") as fh:
             files = {"file": (fname, fh, ct)}
             body = self._post("/file/upload", files=files)
@@ -165,6 +191,7 @@ class WfjbClient:
         POST /vio/report/submit. This files a real 违法举报 with Hangzhou police.
         Returns the success payload (contains 回执号 'xlh').
         """
+        self._refresh_before()      # ensure a fresh token BEFORE we file; never retry after
         return self._post(
             "/vio/report/submit",
             json=report.to_payload(),

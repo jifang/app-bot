@@ -47,15 +47,34 @@ python -m police_report.cli save-replay /tmp/re/mitm.jsonl
 python -m police_report.cli refresh          # writes police_report/.token.json
 ```
 
-Other CLI commands fall back to `police_report/.token.json` automatically, so
-after `refresh` you can just run `whoami` / `submit` without passing `--x-token`.
-If `refresh` ever reports the session expired, do a fresh capture (above).
+`refresh` writes **both** `police_report/.token.json` and the `WFJB_X_TOKEN` line
+in `.env` through one atomic (mode `0600`) persistence step, so the two stores
+never diverge. Other CLI commands pick up the token automatically (preferring
+whichever store holds the later-expiring JWT), so after `refresh` you can just
+run `whoami` / `submit` without passing `--x-token`.
+If `refresh` ever reports the session expired, re-establish it:
+
+```bash
+python -m police_report.cli login          # portal SSO (uses WFJB_PHONE), saves session
+```
+
+then re-capture the `wfjb.auth` request once (see above) so `refresh` works again.
+(`login` alone can't mint an `x-token`: the mgop `sign` from the app's native SDK
+is still required to rebuild the replay template — see `auth.py`.)
 Notes:
 - `refresh` hits `mapi-jcss.police.hangzhou.gov.cn` directly, so the host must be
   able to reach it (China-direct routing — see FINDINGS §3).
-- The gateway **throttles rapid identical replays** with an empty `200`; `refresh`
-  retries with backoff and, if still throttled, leaves the current token in place.
-  Wait a bit and retry.
+- All refresh goes through one `TokenProvider` (`token_provider.py`) under a file
+  lock. It is **lazy** — it replays only when the cached JWT is within ~10 min of
+  expiry — and classifies each attempt explicitly as `OK` / `THROTTLED` /
+  `PORTAL_EXPIRED` / `BAD_TEMPLATE` / `NETWORK_ERROR`, recording the result in
+  `police_report/.token_state.json` (gitignored) for the operator/cron.
+- The gateway **throttles rapid identical replays** with an empty `200`. If the
+  cached token is still valid, that's harmless (retry later); if it's near expiry
+  and can't be renewed, `refresh`/the cron exits non-zero so you re-capture.
+- Reads (`whoami`, `dict`, `history`) auto-refresh and retry once on an auth
+  failure. `submit` refreshes *before* filing but never retries afterward — a
+  blind retry could file a duplicate real report.
 
 ### `.env` (gitignored)
 
@@ -98,6 +117,8 @@ python -m police_report.extract_overlay clip.mov --at 3.5 \
 ## CLI
 
 ```bash
+python -m police_report.cli login                  # portal SSO login, saves session
+python -m police_report.cli refresh                # re-mint x-token via replay
 python -m police_report.cli whoami                 # account info
 python -m police_report.cli dict wflx              # 19 violation-type codes
 python -m police_report.cli dict areas             # district (areaCode) tree

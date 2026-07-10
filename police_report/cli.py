@@ -19,12 +19,18 @@ import json
 import os
 import sys
 
-from .auth import REPLAY_PATH, get_token_from_mitm, refresh_token, save_replay_template
+import requests
+
+from .auth import (
+    ENV_PATH,
+    REPLAY_PATH,
+    TOKEN_PATH,
+    decode_exp,
+    get_token_from_mitm,
+    save_replay_template,
+)
 from .client import ViolationReport, WfjbClient, WfjbError
 from .resolve import ResolveError, resolve_report
-
-TOKEN_PATH = os.path.join(os.path.dirname(__file__), ".token.json")
-ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 
 
 def _load_env(path: str = ENV_PATH) -> None:
@@ -51,32 +57,42 @@ def _load_token_file() -> dict:
     return {}
 
 
-def _save_token_file(token: str, cna: str) -> None:
-    import base64
-    exp = None
-    try:
-        pad = lambda s: s + "=" * (-len(s) % 4)
-        exp = json.loads(base64.urlsafe_b64decode(pad(token.split(".")[1]))).get("exp")
-    except Exception:
-        pass
-    json.dump({"x_token": token, "cna": cna or "", "exp": exp},
-              open(TOKEN_PATH, "w"), indent=2)
-
-
 def _make_client(args) -> WfjbClient:
-    token = args.x_token or os.environ.get("WFJB_X_TOKEN")
     cna = args.cna or os.environ.get("WFJB_CNA", "")
+    # Explicit tokens are used verbatim and stand alone — no provider, so a
+    # caller-supplied token is never silently overridden by the stored one.
     if args.from_mitm:
         got = get_token_from_mitm(args.from_mitm)
         if not got:
             sys.exit(f"no wfjb x-token found in {args.from_mitm}")
         token, cna = got
-    if not token:                       # fall back to the persisted token file
-        tf = _load_token_file()
-        token, cna = tf.get("x_token"), (cna or tf.get("cna", ""))
+        return WfjbClient(token, cna)
+    if args.x_token:
+        return WfjbClient(args.x_token, cna)
+
+    # Stored-token path: let the provider mint a fresh token if the cached one is
+    # stale (needs a replay template); fall back to whatever the two stores hold.
+    from .token_provider import TokenUnavailable, default_provider
+    provider = default_provider()
+    tf = _load_token_file()
+    try:
+        token = provider.get_token()
+    except TokenUnavailable:
+        token = _fresher(os.environ.get("WFJB_X_TOKEN"), tf.get("x_token"))
+    if not cna:
+        cna = tf.get("cna", "")
     if not token:
-        sys.exit("no token: run `refresh`, pass --x-token, set WFJB_X_TOKEN, or use --from-mitm")
-    return WfjbClient(token, cna)
+        sys.exit("no token: run `refresh`/`login`, pass --x-token, set WFJB_X_TOKEN, or use --from-mitm")
+    return WfjbClient(token, cna, provider=provider)
+
+
+def _fresher(a: str | None, b: str | None) -> str | None:
+    """Return whichever token expires later (missing/undecodable exp sorts oldest)."""
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if (decode_exp(a) or 0) >= (decode_exp(b) or 0) else b
 
 
 def _report_from_json(path: str) -> ViolationReport:
@@ -113,6 +129,8 @@ def main(argv=None):
 
     sub.add_parser("whoami")
     sub.add_parser("refresh")           # re-mint x-token via replay, no app needed
+    lg = sub.add_parser("login")        # portal SSO login -> persists session
+    lg.add_argument("phone", nargs="?", help="defaults to WFJB_PHONE from .env")
     sr = sub.add_parser("save-replay")  # save the wfjb.auth replay template
     sr.add_argument("mitm_jsonl")
     d = sub.add_parser("dict"); d.add_argument("which", choices=["wflx", "areas"])
@@ -127,22 +145,40 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     try:
+        if args.cmd == "login":
+            from .portal_login import SESSION_PATH, login_full, request_otp, save_session
+            phone = args.phone or os.environ.get("WFJB_PHONE")
+            if not phone:
+                sys.exit("login: pass a phone number or set WFJB_PHONE in .env")
+            try:
+                request_otp(phone)
+                print(f"OTP sent to {phone[:3]}****{phone[-4:]}.")
+                code = input("enter SMS code: ").strip()
+                if not code:
+                    sys.exit("login: no SMS code entered")
+                res = login_full(phone, code)
+            except (RuntimeError, requests.RequestException) as e:
+                sys.exit(f"login error: {e}")
+            save_session(res)
+            print(f"logged in as {res.user_name or '(unknown)'} — session saved -> {SESSION_PATH}")
+            print("NOTE: mgop `sign` is still required to rebuild the replay template "
+                  "from this session; re-capture the wfjb.auth request once to enable `refresh`.")
+            return
+
         if args.cmd == "save-replay":
             ok = save_replay_template(args.mitm_jsonl)
             print(f"replay template saved -> {REPLAY_PATH}" if ok
                   else f"no wfjb.auth request found in {args.mitm_jsonl}")
             return
         if args.cmd == "refresh":
-            try:
-                token = refresh_token()
-            except RuntimeError as e:
-                sys.exit(f"refresh error: {e}")
-            cna = args.cna or os.environ.get("WFJB_CNA", "") or _load_token_file().get("cna", "")
-            _save_token_file(token, cna)
-            import base64, time
-            exp = json.loads(base64.urlsafe_b64decode(
-                token.split(".")[1] + "==")).get("exp")
-            print(f"refreshed x-token -> {TOKEN_PATH}")
+            from .token_provider import RefreshOutcome, default_provider
+            res = default_provider().refresh(force=True)   # persists atomically (0600)
+            if res.outcome is not RefreshOutcome.OK or not res.token:
+                sys.exit(f"refresh {res.outcome.value}: {res.detail}")
+            import time
+            token = res.token
+            exp = decode_exp(token) or 0
+            print(f"refreshed x-token -> {TOKEN_PATH} (+ .env)")
             print(f"  {token[:14]}...{token[-6:]} | exp {time.strftime('%H:%M:%S', time.localtime(exp))}"
                   f" ({(exp - time.time())/60:.0f} min)")
             return

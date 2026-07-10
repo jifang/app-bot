@@ -19,8 +19,48 @@ import json
 import os
 import sys
 
-from .auth import get_token_from_mitm
+from .auth import REPLAY_PATH, get_token_from_mitm, refresh_token, save_replay_template
 from .client import ViolationReport, WfjbClient, WfjbError
+from .resolve import ResolveError, resolve_report
+
+TOKEN_PATH = os.path.join(os.path.dirname(__file__), ".token.json")
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+
+def _load_env(path: str = ENV_PATH) -> None:
+    """Load KEY=VALUE lines from the gitignored .env into os.environ (no override)."""
+    if not os.path.isfile(path):
+        return
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env()
+
+
+def _load_token_file() -> dict:
+    if os.path.isfile(TOKEN_PATH):
+        try:
+            return json.load(open(TOKEN_PATH, encoding="utf-8"))
+        except ValueError:
+            pass
+    return {}
+
+
+def _save_token_file(token: str, cna: str) -> None:
+    import base64
+    exp = None
+    try:
+        pad = lambda s: s + "=" * (-len(s) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(pad(token.split(".")[1]))).get("exp")
+    except Exception:
+        pass
+    json.dump({"x_token": token, "cna": cna or "", "exp": exp},
+              open(TOKEN_PATH, "w"), indent=2)
 
 
 def _make_client(args) -> WfjbClient:
@@ -31,13 +71,24 @@ def _make_client(args) -> WfjbClient:
         if not got:
             sys.exit(f"no wfjb x-token found in {args.from_mitm}")
         token, cna = got
+    if not token:                       # fall back to the persisted token file
+        tf = _load_token_file()
+        token, cna = tf.get("x_token"), (cna or tf.get("cna", ""))
     if not token:
-        sys.exit("no token: pass --x-token, set WFJB_X_TOKEN, or use --from-mitm")
+        sys.exit("no token: run `refresh`, pass --x-token, set WFJB_X_TOKEN, or use --from-mitm")
     return WfjbClient(token, cna)
 
 
 def _report_from_json(path: str) -> ViolationReport:
     d = json.load(open(path, encoding="utf-8"))
+    # Pre-fill reporter identity from .env when the field is blank or a placeholder.
+    for key, env in (("phone", "WFJB_PHONE"), ("name", "WFJB_NAME")):
+        val = str(d.get(key, "")).strip()
+        if (not val or val.startswith("FILL_ME")) and os.environ.get(env):
+            d[key] = os.environ[env]
+    # Map human-friendly names (vioType / areaName) -> backend codes. Strict:
+    # a name that matches nothing raises ResolveError *before* any submit.
+    d = resolve_report(d)
     # Accept real-world coords under lng/lat and apply the wire swap for the user.
     if "longitude" in d and "latitude" in d and "coords" not in d:
         lng, lat = d.pop("longitude"), d.pop("latitude")
@@ -61,6 +112,9 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("whoami")
+    sub.add_parser("refresh")           # re-mint x-token via replay, no app needed
+    sr = sub.add_parser("save-replay")  # save the wfjb.auth replay template
+    sr.add_argument("mitm_jsonl")
     d = sub.add_parser("dict"); d.add_argument("which", choices=["wflx", "areas"])
     sub.add_parser("history")
     u = sub.add_parser("upload"); u.add_argument("path")
@@ -73,8 +127,31 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     try:
+        if args.cmd == "save-replay":
+            ok = save_replay_template(args.mitm_jsonl)
+            print(f"replay template saved -> {REPLAY_PATH}" if ok
+                  else f"no wfjb.auth request found in {args.mitm_jsonl}")
+            return
+        if args.cmd == "refresh":
+            try:
+                token = refresh_token()
+            except RuntimeError as e:
+                sys.exit(f"refresh error: {e}")
+            cna = args.cna or os.environ.get("WFJB_CNA", "") or _load_token_file().get("cna", "")
+            _save_token_file(token, cna)
+            import base64, time
+            exp = json.loads(base64.urlsafe_b64decode(
+                token.split(".")[1] + "==")).get("exp")
+            print(f"refreshed x-token -> {TOKEN_PATH}")
+            print(f"  {token[:14]}...{token[-6:]} | exp {time.strftime('%H:%M:%S', time.localtime(exp))}"
+                  f" ({(exp - time.time())/60:.0f} min)")
+            return
+
         if args.cmd == "submit":
-            report = _report_from_json(args.report_json)
+            try:
+                report = _report_from_json(args.report_json)
+            except ResolveError as e:
+                sys.exit(f"resolve error (not submitted): {e}")
             payload = report.to_payload()
             if not args.confirm or args.dry_run:
                 print("DRY RUN — not submitting. Payload:")

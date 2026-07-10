@@ -33,6 +33,68 @@ For now, get the token from a logged-in session:
 - **Manually**: copy the `X-Token` header value from any wfjb request and pass
   `--x-token …` or set `WFJB_X_TOKEN`. Tokens expire (~1h; JWT `exp`).
 
+### Refreshing without a re-login (replay)
+
+The `mgop.trustway.wfjb.auth` call is **replayable** — the backend does not
+re-check the captured `sign`/`ts` freshness, so re-POSTing it re-mints a fresh
+`x-token` with no app interaction, as long as the portal session is still valid.
+
+```bash
+# once, from a live capture: save the replay template (.auth_replay.json, gitignored)
+python -m police_report.cli save-replay /tmp/re/mitm.jsonl
+
+# thereafter, any time the token is stale — no app, no proxy:
+python -m police_report.cli refresh          # writes police_report/.token.json
+```
+
+Other CLI commands fall back to `police_report/.token.json` automatically, so
+after `refresh` you can just run `whoami` / `submit` without passing `--x-token`.
+If `refresh` ever reports the session expired, do a fresh capture (above).
+Notes:
+- `refresh` hits `mapi-jcss.police.hangzhou.gov.cn` directly, so the host must be
+  able to reach it (China-direct routing — see FINDINGS §3).
+- The gateway **throttles rapid identical replays** with an empty `200`; `refresh`
+  retries with backoff and, if still throttled, leaves the current token in place.
+  Wait a bit and retry.
+
+### `.env` (gitignored)
+
+`police_report/.env` holds reporter identity + the current token — never committed:
+
+```
+WFJB_PHONE=...      # pre-filled into report.json when phone/name are blank/FILL_ME
+WFJB_NAME=...
+WFJB_X_TOKEN=...    # current token (transient); refresh with `cli refresh`
+WFJB_CNA=...
+```
+
+The CLI auto-loads it. Durable refresh material lives in `.auth_replay.json`
+(also gitignored) — that, not the token in `.env`, is what `refresh` replays.
+
+## Auto-fill from dashcam video (OCR)
+
+DVR clips burn `YYYY年M月D日 HH:MM:SS` + full address into the bottom-left of
+every frame. `extract_overlay.py` OCRs that overlay (tesseract + chi_sim) and
+maps it straight onto `vioTime` / `currentAddress`.
+
+```bash
+brew install tesseract tesseract-lang     # ships the chi_sim model
+pip install -r police_report/requirements.txt
+
+# single sample, 3.5s into the clip
+python -m police_report.extract_overlay clip.mov --at 3.5
+
+# sample every 2s across the whole clip — use to find the violation moment
+python -m police_report.extract_overlay clip.mov --scan --interval 2
+
+# merge straight into a report json (only vioTime/currentAddress/areaName touched)
+python -m police_report.extract_overlay clip.mov --at 3.5 \
+    --fill report.example.json -o report.json
+```
+
+`vioAddress` (the free-text "之江路南向近宋城" description) and `longitude`/
+`latitude` aren't in the overlay and still need filling by hand or a geocoder.
+
 ## CLI
 
 ```bash
@@ -67,6 +129,25 @@ report = ViolationReport.from_coords(
 print(c.submit_report(report))     # files the report
 ```
 
+## Name → code mapping (vioType / area)
+
+You can write **human Chinese names** in `report.json` instead of codes:
+
+```json
+"vioType":  "不按规定使用转向灯",   // or the code "bagdyzxd"
+"areaName": "西湖区"                // or "杭州市西湖区"; areaCode filled in for you
+```
+
+At submit time `resolve.py` maps these to backend codes against the cached dict
+(`dicts.json`, refreshed by `cli dict wflx` / `dict areas`). It is **strict** and
+runs *before* any network call:
+
+- a name that matches nothing → `resolve error (not submitted)` with the valid list,
+- an `areaCode`+`areaName` that disagree → error (fix one),
+- a valid code passes through unchanged.
+
+So a typo can never be silently filed. Refresh `dicts.json` if the dicts change.
+
 ## Coordinate swap (important)
 
 The app serializes coordinates **swapped**: real *longitude* goes into the JSON
@@ -83,3 +164,39 @@ geocodes correctly. `report.example.json` also uses real-world `longitude`/
 
 Static dicts (`violation_types()`, `areas()`) rarely change — cache them.
 Address string + coords come from 天地图 (`api.tianditu.gov.cn`); supply your own.
+
+## Dict snapshot (vioType / areaCode)
+
+Snapshot of the two dicts, cached in `dicts.json` and used by the name→code
+resolver. Regenerate anytime with `cli dict wflx` / `cli dict areas`. You can type
+the 名称 directly in `report.json` (see *Name → code mapping* above).
+
+### vioType — 19 codes
+
+| code | 名称 | | code | 名称 |
+|---|---|---|---|---|
+| `jdcchd` | 机动车闯红灯 | | `mtccj` | 摩托车闯禁 |
+| `sxbd` | 实线变道 | | `kslhccj` | 快速路货车闯禁 |
+| `qxjs` | 强行加塞 | | `gjczwt` | 公交车站违法停放 |
+| `jdcnxxs` | 机动车逆向行驶 | | `bagdyzxd` | 不按规定使用转向灯 |
+| `jdcwdxs` | 机动车未按导向车道行驶 | | `zylj` | 高速公路占用路肩/应急车道（试行） |
+| `jdcwcjxs` | 机动车未在机动车道内通行 | | `nxdc` | 高速公路逆行/倒车（试行） |
+| `jdcbrx` | 机动车斑马线不让行 | | `gspsdl` | 高速公路抛洒滴漏（试行） |
+| `kcdsj` | 开车打手机 | | `dhcwrx` | 大货车右转弯未让行 |
+| `jdcwt` | 机动车违法停车 | | `kccyzk` | 客车超员载客 |
+| `qcgzzj` | 小型汽车改装炸街 | | | |
+
+Some types are area-restricted (the dict `bz` field lists valid areaCodes; 高速 types only in `330100`+`GS00x`).
+
+### areaCode — 杭州市 (330100) districts
+
+| code | 区 | | code | 区 |
+|---|---|---|---|---|
+| `330102` | 上城区 | | `330111` | 富阳区 |
+| `330105` | 拱墅区 | | `330112` | 临安区 |
+| `330106` | 西湖区 | | `330122` | 桐庐县 |
+| `330108` | 滨江区 | | `330127` | 淳安县 |
+| `330197` | 西湖景区 | | `330182` | 建德市 |
+| `330192` | 高架快速路 | | `330109` | 萧山区 |
+| `330196` | 绕城高速 | | `330110` | 余杭区 |
+| `330113` | 临平区 | | `330114` | 钱塘区 |

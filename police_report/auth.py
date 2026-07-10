@@ -34,7 +34,9 @@ the sign + gsid are available.
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from typing import Optional
 
 import requests
@@ -73,6 +75,83 @@ def mgop_auth(*, gsid: str, sign: str, ts: int,
     if body.get("code") != 200 or "token" not in body.get("data", {}):
         raise RuntimeError(f"mgop auth failed: {resp.status_code} {resp.text[:200]}")
     return body["data"]
+
+
+REPLAY_PATH = os.path.join(os.path.dirname(__file__), ".auth_replay.json")
+
+
+def save_replay_template(jsonl_path: str, out_path: str = REPLAY_PATH) -> bool:
+    """
+    Extract the app's captured `mgop.trustway.wfjb.auth` request (URL + headers +
+    body) from a mitm capture and save it as a replay template. The captured
+    `sign`/`sid`/`ts` are reused on replay; the wfjb backend does NOT re-check
+    their freshness (verified), so replaying re-mints a token without any app
+    interaction — as long as the underlying portal session stays valid.
+    Returns True if a template was saved.
+    """
+    tpl = None
+    for line in open(jsonl_path, encoding="utf-8"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        hdrs = {k.lower(): v for k, v in rec.get("req_headers", {}).items()}
+        if "wfjb.auth" in hdrs.get("api", ""):
+            tpl = {
+                "url": "https://" + rec["host"] + rec["path"],
+                "headers": rec["req_headers"],
+                "body_hex": rec.get("req_body_b64", ""),
+            }
+    if not tpl:
+        return False
+    json.dump(tpl, open(out_path, "w"), indent=2)
+    return True
+
+
+def refresh_token(replay_path: str = REPLAY_PATH) -> str:
+    """
+    Replay the saved wfjb.auth template -> a fresh `x-token` JWT. Raises if the
+    template is missing or the backend declines (e.g. the portal session finally
+    expired — then a new capture is needed). Does not need the app or a proxy.
+    """
+    if not os.path.isfile(replay_path):
+        raise RuntimeError(
+            f"no replay template at {replay_path}. Capture one first with "
+            f"`save_replay_template(<mitm.jsonl>)` while logged in."
+        )
+    tpl = json.load(open(replay_path, encoding="utf-8"))
+    hdrs = {k: v for k, v in tpl["headers"].items()
+            if k.lower() not in ("content-length", "host", "accept-encoding")}
+    body = bytes.fromhex(tpl["body_hex"]) if tpl.get("body_hex") else b""
+
+    # The mgop gateway throttles rapid identical replays with an empty 200 body.
+    # Retry a few times with backoff before giving up.
+    last = ""
+    for attempt in range(4):
+        resp = requests.post(tpl["url"], headers=hdrs, data=body, timeout=30)
+        if resp.content:
+            try:
+                j = resp.json()
+            except ValueError:
+                last = f"non-JSON {resp.status_code}: {resp.text[:120]}"
+            else:
+                tok = (j.get("data") or {}).get("token")
+                if j.get("code") == 200 and tok:
+                    return tok
+                if j.get("code") != 200:
+                    raise RuntimeError(
+                        f"refresh declined: code={j.get('code')} msg={j.get('msg')}. "
+                        f"Portal session may have expired — re-capture needed."
+                    )
+                last = "200 but no token"
+        else:
+            last = f"empty {resp.status_code} body (gateway throttling)"
+        if attempt < 3:
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(
+        f"refresh failed after retries: {last}. The existing token may still be "
+        f"valid; wait a bit and retry, or re-capture if the session expired."
+    )
 
 
 def get_token_from_mitm(jsonl_path: str) -> Optional[tuple[str, str]]:

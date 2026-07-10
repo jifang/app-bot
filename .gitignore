@@ -5,6 +5,25 @@ node_modules/
 # --- captures / secrets — NEVER commit (live session cookies, PII, order data) ---
 *.log
 *.jsonl
+.token.json
+police_report/.token.json
+.auth_replay.json
+police_report/.auth_replay.json
+.env
+.env.*
+police_report/.env
+
+# working report instance — real plate/report PII, keep off-repo (template is report.example.json)
+report.todo.json
+police_report/report.todo.json
+# real filed reports: keep locally for archival, never push (negation [^e] keeps report.example.json)
+report.[^e]*.json
+police_report/report.[^e]*.json
+
+# scratch RE working dir — apk / jadx / frida hooks, regenerate from sources anytime
+_research/
+_captures/
+
 capture.log
 sf_net.jsonl
 sf_requests.jsonl

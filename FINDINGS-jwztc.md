@@ -47,7 +47,11 @@ adb shell settings put global http_proxy 192.168.100.44:8080   # host LAN IP
 ```
 
 Then `mitmdump -s mitm_addon.py`. This decrypts **everything** including the mgop RPC
-gateway. App stays stable (no in-process hooks). Revert: `settings put global http_proxy :0` (CA gone on reboot).
+gateway. App stays stable (no in-process hooks). Revert: `settings put global http_proxy :0` + `umount /system/etc/security/cacerts` (CA also gone on reboot).
+
+**Two gotchas that cost hours when re-running on a different day/host:**
+- **CA is a tmpfs bind-mount → gone on reboot** (and can be shadowed by a stale mount). Re-push + re-mount each session; verify `ls /system/etc/security/cacerts/$HASH.0` before capturing.
+- **The capture host must egress China-local.** The gov WAF (`dbappwaf.cn`/`saaswaf.com`) geo-DNS returns different IP pools per resolver egress; if the host routes through an overseas VPN/split-route, mitm's upstream gets China-only IPs it **can't reach** → `502 Bad Gateway`, app shows `网络错误`, no wfjb traffic. Fix: route `police.hangzhou.gov.cn` + `dbappwaf.cn` + `saaswaf.com` **DIRECT** on the gateway (e.g. OpenClash rule) so the host egresses like the phone. If proxy is USB-only, `adb reverse tcp:8080 tcp:8080` + `http_proxy 127.0.0.1:8080` avoids a same-subnet requirement.
 
 ## The wfjb backend (违法举报)
 
@@ -57,6 +61,7 @@ video-upload → submit flow are documented in **[`police_report/README.md`](pol
 
 Key facts recorded there, worth flagging here:
 - JWT is minted by `POST mapi-jcss.police.hangzhou.gov.cn/app/mgop` (`api: mgop.trustway.wfjb.auth`); needs a portal SSO `gsid` + an mgop `sign` (native SDK, **not reversed**) → from-scratch login not automated; token taken from a live session.
+- **The mint call is replayable** (verified): the backend does **not** re-check the captured `sign`/`ts` freshness, so re-POSTing the exact `wfjb.auth` request re-mints a fresh ~1h `x-token` with **no app interaction and no re-login** — as long as the portal session stays valid. This sidesteps the un-reversed `sign` for token *refresh*. See `auth.save_replay_template` / `refresh_token` and `cli refresh`. Caveat: the gateway throttles rapid identical replays with an empty `200` body — `refresh_token` retries with backoff.
 - Submit body **swaps lat/lng**: real longitude goes in JSON `latitude`, real latitude in `longitude`. Reproduce exactly.
 
 ## Files (this session)
@@ -67,11 +72,11 @@ Key facts recorded there, worth flagging here:
 | `antidetect.entry.js` | standalone msaoaidsec watchdog neuter |
 | `jtap.entry.js` / `run_jtap.py` | generic BoringSSL SSL_read/write tap |
 | `mitm_addon.py` | **the working capture** — mitmproxy addon, full flows → `/tmp/re/mitm.jsonl` |
-| `police_report/` | the deliverable: Python client (auth/upload/submit + CLI) |
+| `police_report/` | the deliverable: Python client — auth/upload/submit + CLI, plus token **replay-refresh** (`cli refresh`), dashcam-overlay **OCR** (`extract_overlay.py`), and human-name→code **resolver** (`resolve.py`, backed by cached `dicts.json`) |
 
-Captures (`/tmp/re/*.jsonl`) contain real PII (name/phone/token) — stay off-repo (gitignored).
+Captures (`/tmp/re/*.jsonl`) and `police_report/.token.json` / `.auth_replay.json` contain real PII (name/phone/token/`sign`) — all gitignored, keep off-repo.
 
 ## Open items
 
-- Reverse the mgop `sign` + capture the portal SSO `gsid` flow → full login-from-scratch (currently token is grabbed from a live session via `auth.get_token_from_mitm`). Not scheduled.
-- `submit` files a **real** police report; client fails closed (`--confirm` required). Do not file false reports.
+- Reverse the mgop `sign` + capture the portal SSO `gsid` flow → full login-from-scratch. **Partially obviated for refresh** by the replay trick (`refresh_token` re-mints without app/re-login while the portal session lives); full from-scratch login still needs the `sign`. Not scheduled.
+- `submit` files a **real** police report; client fails closed (`--confirm` required). Do not file false reports. (One real report filed this session: 回执 xlh 1493 / id 683341.)

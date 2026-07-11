@@ -44,7 +44,7 @@ def test_make_client_uses_provider_token(monkeypatch):
     """When the provider can supply a (fresh) token, that token is used and the
     provider is attached so reads/submit can refresh."""
     class _FakeProvider:
-        def get_token(self, *, min_ttl_s=None):
+        def get_token(self, *, min_ttl_s=None, allow_degraded=True, bypass_backoff=False):
             return _jwt(9999999999)
 
     prov = _FakeProvider()
@@ -64,7 +64,7 @@ def test_make_client_falls_back_to_fresher_when_provider_unavailable(monkeypatch
     fresh_file = _jwt(9999999999)
 
     class _DeadProvider:
-        def get_token(self, *, min_ttl_s=None):
+        def get_token(self, *, min_ttl_s=None, allow_degraded=True, bypass_backoff=False):
             raise TokenUnavailable(RefreshOutcome.BAD_TEMPLATE, "no template")
 
     monkeypatch.setattr("police_report.token_provider.default_provider",

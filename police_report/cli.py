@@ -128,7 +128,9 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("whoami")
-    sub.add_parser("refresh")           # re-mint x-token via replay, no app needed
+    rf = sub.add_parser("refresh")   # re-mint x-token via replay, no app needed
+    rf.add_argument("--bypass-backoff", action="store_true",
+                    help="ignore throttle next_retry_at cooldown")
     lg = sub.add_parser("login")        # portal SSO login -> persists session
     lg.add_argument("phone", nargs="?", help="defaults to WFJB_PHONE from .env")
     sr = sub.add_parser("save-replay")  # save the wfjb.auth replay template
@@ -146,17 +148,18 @@ def main(argv=None):
 
     try:
         if args.cmd == "login":
-            from .portal_login import SESSION_PATH, login_full, request_otp, save_session
+            from .portal_login import SESSION_PATH, PortalLoginFlow, save_session
             phone = args.phone or os.environ.get("WFJB_PHONE")
             if not phone:
                 sys.exit("login: pass a phone number or set WFJB_PHONE in .env")
+            flow = PortalLoginFlow(phone)
             try:
-                request_otp(phone)
+                flow.request_otp()
                 print(f"OTP sent to {phone[:3]}****{phone[-4:]}.")
                 code = input("enter SMS code: ").strip()
                 if not code:
                     sys.exit("login: no SMS code entered")
-                res = login_full(phone, code)
+                res = flow.complete(code)
             except (RuntimeError, requests.RequestException) as e:
                 sys.exit(f"login error: {e}")
             save_session(res)
@@ -167,18 +170,23 @@ def main(argv=None):
 
         if args.cmd == "save-replay":
             ok = save_replay_template(args.mitm_jsonl)
-            print(f"replay template saved -> {REPLAY_PATH}" if ok
-                  else f"no wfjb.auth request found in {args.mitm_jsonl}")
+            if ok:
+                print(f"replay template saved -> {REPLAY_PATH}")
+                print(f"hint: securely delete the raw capture when done "
+                      f"(e.g. rm -P {args.mitm_jsonl!r})")
+            else:
+                print(f"no wfjb.auth request found in {args.mitm_jsonl}")
             return
         if args.cmd == "refresh":
             from .token_provider import RefreshOutcome, default_provider
-            res = default_provider().refresh(force=True)   # persists atomically (0600)
+            res = default_provider().refresh(
+                force=True, bypass_backoff=args.bypass_backoff)
             if res.outcome is not RefreshOutcome.OK or not res.token:
                 sys.exit(f"refresh {res.outcome.value}: {res.detail}")
             import time
             token = res.token
             exp = decode_exp(token) or 0
-            print(f"refreshed x-token -> {TOKEN_PATH} (+ .env)")
+            print(f"refreshed x-token -> {TOKEN_PATH}")
             print(f"  {token[:14]}...{token[-6:]} | exp {time.strftime('%H:%M:%S', time.localtime(exp))}"
                   f" ({(exp - time.time())/60:.0f} min)")
             return

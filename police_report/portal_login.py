@@ -10,6 +10,9 @@ Captured sequence (see /tmp/re/mitm.jsonl session 1):
 
 Phone + smsCode are RSA-PKCS#1-v1.5 encrypted under the pubkey.
 `identifier` is also RSA-encrypted under the same pubkey.
+
+Prefer `PortalLoginFlow` so OTP request and completion share one HTTP Session,
+pubkey, and device id (server may bind OTP to that context).
 """
 from __future__ import annotations
 
@@ -87,7 +90,7 @@ def _send_otp(s: requests.Session, phone: str, pubkey_pem: str) -> None:
 
 
 def _do_login(s: requests.Session, phone: str, sms_code: str,
-              pubkey_pem: str) -> dict:
+              pubkey_pem: str, device_id: str) -> dict:
     enc_id = _rsa_encrypt(pubkey_pem, phone)
     enc_phone = _rsa_encrypt(pubkey_pem, phone)
     enc_code = _rsa_encrypt(pubkey_pem, sms_code)
@@ -98,7 +101,7 @@ def _do_login(s: requests.Session, phone: str, sms_code: str,
         "encrypt": True,
         "deviceOsType": "Android",
         "publicKey": pubkey_pem,
-        "deviceId": DEVICE_ID,
+        "deviceId": device_id,
     }
     r = s.post(f"{BASE}/uc/login",
                headers={k: v for k, v in GUC_HEADERS.items() if k != "User-Agent"},
@@ -142,26 +145,66 @@ class LoginResult:
     auth_code: str
 
 
+def _redact(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def redact_login_result(r: LoginResult) -> dict:
+    """Safe-for-terminal view of a LoginResult (no full secrets)."""
+    return {
+        "main_gsid": _redact(r.main_gsid),
+        "person_gsid": _redact(r.person_gsid),
+        "user_name": r.user_name,
+        "access_token": _redact(r.access_token),
+        "refresh_token": _redact(r.refresh_token),
+        "auth_code": _redact(r.auth_code),
+    }
+
+
+class PortalLoginFlow:
+    """OTP + login on one shared Session / pubkey / device id."""
+
+    def __init__(self, phone: str, device_id: Optional[str] = None,
+                 session: Optional[requests.Session] = None):
+        self.phone = phone
+        self.device_id = device_id or DEVICE_ID
+        self.session = session or requests.Session()
+        self.pubkey: Optional[str] = None
+
+    def request_otp(self) -> str:
+        self.pubkey = _get_pubkey(self.session)
+        _send_otp(self.session, self.phone, self.pubkey)
+        return self.pubkey
+
+    def complete(self, sms_code: str) -> LoginResult:
+        if not self.pubkey:
+            self.pubkey = _get_pubkey(self.session)
+        main = _do_login(self.session, self.phone, sms_code, self.pubkey,
+                         self.device_id)
+        code = _get_auth_code(self.session, main["gsid"])
+        person = _person_login(self.session, code)
+        return LoginResult(
+            main_gsid=main["gsid"],
+            person_gsid=person,
+            user_name=main.get("userName", ""),
+            access_token=main.get("accessToken", ""),
+            refresh_token=main.get("refreshToken", ""),
+            auth_code=code,
+        )
+
+
 def login_full(phone: str, sms_code: str,
                device_id: Optional[str] = None) -> LoginResult:
-    """One-shot: send OTP was already done; you supply code. Returns both gsids
-    plus the access/refresh tokens (previously dropped)."""
-    if device_id:
-        global DEVICE_ID
-        DEVICE_ID = device_id
-    s = requests.Session()
-    pub = _get_pubkey(s)
-    main = _do_login(s, phone, sms_code, pub)
-    code = _get_auth_code(s, main["gsid"])
-    person = _person_login(s, code)
-    return LoginResult(
-        main_gsid=main["gsid"],
-        person_gsid=person,
-        user_name=main.get("userName", ""),
-        access_token=main.get("accessToken", ""),
-        refresh_token=main.get("refreshToken", ""),
-        auth_code=code,
-    )
+    """One-shot complete (fresh Session). Prefer PortalLoginFlow when OTP was
+    already requested so the Session/pubkey stay shared."""
+    flow = PortalLoginFlow(phone, device_id=device_id)
+    # No prior OTP on this Session — fetch pubkey and login only.
+    flow.pubkey = _get_pubkey(flow.session)
+    return flow.complete(sms_code)
 
 
 def save_session(r: LoginResult, path: str = SESSION_PATH) -> None:
@@ -185,12 +228,9 @@ def load_session(path: str = SESSION_PATH) -> Optional[dict]:
 
 
 def request_otp(phone: str) -> str:
-    """Step 1 only: fetch pubkey + send OTP. Returns the pubkey (caller may want
-    to verify it). Throws on failure."""
-    s = requests.Session()
-    pub = _get_pubkey(s)
-    _send_otp(s, phone, pub)
-    return pub
+    """Step 1 only (standalone Session). Prefer PortalLoginFlow for full login."""
+    flow = PortalLoginFlow(phone)
+    return flow.request_otp()
 
 
 # ---- smoke test (mirrors the captured flow exactly) ----
@@ -201,7 +241,7 @@ if __name__ == "__main__":
         sms = sys.argv[2]
         r = login_full(phone, sms)
         save_session(r)
-        print(json.dumps(asdict(r), ensure_ascii=False, indent=2))
+        print(json.dumps(redact_login_result(r), ensure_ascii=False, indent=2))
         print(f"session saved -> {SESSION_PATH}")
     else:
         print("usage: python -m police_report.portal_login <phone> <sms_code>")

@@ -81,13 +81,14 @@ def _atomic_write(path: str, data: str, mode: int = 0o600) -> None:
 
 def save_token(token: str, cna: str = "", *,
                token_path: str = TOKEN_PATH, env_path: str = ENV_PATH) -> None:
-    """One authoritative, atomic (0600) persistence for the x-token.
+    """Atomic (0600) persistence for the x-token into `.token.json` only.
 
-    Writes `.token.json` AND updates `WFJB_X_TOKEN` in `.env` (adding the line if
-    absent). Both are updated together so `cli refresh` and the CLI's env lookup
-    can never diverge — the shadowing bug where `.env` kept an expired token.
+    `.token.json` is the sole token state source. `.env` holds reporter identity
+    (`WFJB_PHONE` / `WFJB_NAME`) and optional one-shot overrides — it is never
+    written here. `env_path` is accepted for API compatibility but ignored.
     Preserves the existing `cna` when one isn't supplied.
     """
+    del env_path  # sole store is token_path; keep kw for call-site compatibility
     if not cna and os.path.isfile(token_path):
         try:
             cna = json.load(open(token_path, encoding="utf-8")).get("cna", "")
@@ -95,15 +96,6 @@ def save_token(token: str, cna: str = "", *,
             cna = ""
     _atomic_write(token_path, json.dumps(
         {"x_token": token, "cna": cna, "exp": decode_exp(token)}, indent=2))
-    if os.path.isfile(env_path):
-        env = open(env_path, encoding="utf-8").read()
-        if re.search(r"^WFJB_X_TOKEN=", env, flags=re.M):
-            env = re.sub(r"^WFJB_X_TOKEN=.*$", f"WFJB_X_TOKEN={token}", env, flags=re.M)
-        else:
-            if env and not env.endswith("\n"):
-                env += "\n"
-            env += f"WFJB_X_TOKEN={token}\n"
-        _atomic_write(env_path, env)
 
 
 def validate_mgop_url(url: str) -> None:
@@ -175,10 +167,12 @@ def save_replay_template(jsonl_path: str, out_path: str = REPLAY_PATH) -> bool:
         if "wfjb.auth" in hdrs.get("api", ""):
             url = "https://" + rec["host"] + rec["path"]
             validate_mgop_url(url)   # never persist a template that points elsewhere
+            # Prefer structured `body_hex`; accept legacy `req_body_b64` (also hex).
+            body_hex = rec.get("body_hex") or rec.get("req_body_b64", "")
             tpl = {
                 "url": url,
                 "headers": rec["req_headers"],
-                "body_hex": rec.get("req_body_b64", ""),
+                "body_hex": body_hex,
             }
     if not tpl:
         return False

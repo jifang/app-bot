@@ -55,8 +55,13 @@ def test_signature_expired_exits_one_even_if_token_valid():
     assert auto_refresh.main(provider=p) == 1
 
 
-def test_portal_expired_exits_one_even_if_token_valid():
-    p = _FakeProvider(RefreshOutcome.PORTAL_EXPIRED, ttl=300)  # session dead, unrecoverable
+def test_auth_expired_exits_one_even_if_token_valid():
+    p = _FakeProvider(RefreshOutcome.AUTH_EXPIRED, ttl=300)
+    assert auto_refresh.main(provider=p) == 1
+
+
+def test_portal_expired_alias_still_unrecoverable():
+    p = _FakeProvider(RefreshOutcome.PORTAL_EXPIRED, ttl=300)
     assert auto_refresh.main(provider=p) == 1
 
 

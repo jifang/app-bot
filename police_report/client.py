@@ -29,6 +29,13 @@ _UA = (
 class WfjbError(RuntimeError):
     """Non-200 business code or transport error from the wfjb backend."""
 
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 business_code=None, auth_failure: bool = False):
+        super().__init__(message)
+        self.http_status = http_status
+        self.business_code = business_code
+        self.auth_failure = auth_failure
+
 
 @dataclass
 class ViolationReport:
@@ -109,22 +116,22 @@ class WfjbClient:
         self.s.headers["X-Token"] = token
 
     def _refresh_before(self, min_ttl_s: int = 600) -> None:
-        """Swap in a token that is fresh enough, refreshing via the provider if
-        needed. Used before a submit — no post-response retry is ever attempted."""
+        """Swap in a token that meets `min_ttl_s`. Writes refuse degraded tokens."""
         if self.provider:
-            self._set_token(self.provider.get_token(min_ttl_s=min_ttl_s))
+            self._set_token(self.provider.get_token(
+                min_ttl_s=min_ttl_s, allow_degraded=False))
 
     # ---- low level ----
     def _get(self, path: str, **kw) -> dict:
-        """GET an idempotent read. On failure, refresh once via the provider and
-        retry exactly once (safe: reads are idempotent)."""
+        """GET an idempotent read. On *auth* failure only, refresh once via the
+        provider and retry exactly once (safe: reads are idempotent)."""
         try:
             return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
-        except WfjbError:
-            if not self.provider:
+        except WfjbError as e:
+            if not self.provider or not e.auth_failure:
                 raise
             res = self.provider.refresh(force=True)
-            if not res.token:               # refresh couldn't help — surface original class
+            if not res.token:               # refresh couldn't help — surface original
                 raise
             self._set_token(res.token)
             return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
@@ -139,9 +146,15 @@ class WfjbClient:
         try:
             body = resp.json()
         except ValueError:
-            raise WfjbError(f"non-JSON response {resp.status_code}: {resp.text[:200]}")
-        if body.get("code") != 200:
-            raise WfjbError(f"code={body.get('code')} msg={body.get('msg')} ({resp.status_code})")
+            raise WfjbError(
+                f"non-JSON response {resp.status_code}: {resp.text[:200]}",
+                http_status=resp.status_code, auth_failure=resp.status_code in (401, 403))
+        code = body.get("code")
+        if code != 200:
+            auth = resp.status_code in (401, 403) or code in (401, 403)
+            raise WfjbError(
+                f"code={code} msg={body.get('msg')} ({resp.status_code})",
+                http_status=resp.status_code, business_code=code, auth_failure=auth)
         return body
 
     # ---- read-only ----

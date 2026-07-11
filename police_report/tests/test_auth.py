@@ -8,7 +8,6 @@ import base64
 import json
 import os
 import stat
-import time
 
 import pytest
 
@@ -37,9 +36,9 @@ def test_decode_exp_none_on_garbage():
     assert auth.decode_exp("not-a-jwt") is None
 
 
-# ---- save_token: one atomic 0600 store, two files in sync -----------------
+# ---- save_token: sole store is .token.json --------------------------------
 
-def test_save_token_writes_both_stores_0600(tmp_path):
+def test_save_token_writes_token_json_0600_not_env(tmp_path):
     tok = _jwt(1893456000)
     token_path = str(tmp_path / ".token.json")
     env_path = str(tmp_path / ".env")
@@ -50,23 +49,8 @@ def test_save_token_writes_both_stores_0600(tmp_path):
 
     data = json.load(open(token_path))
     assert data == {"x_token": tok, "cna": "CNA1", "exp": 1893456000}
-    assert f"WFJB_X_TOKEN={tok}" in open(env_path).read()
-    assert "WFJB_PHONE=13800000000" in open(env_path).read()   # identity untouched
-    for p in (token_path, env_path):
-        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
-
-
-def test_save_token_appends_env_var_when_absent(tmp_path):
-    tok = _jwt(1893456000)
-    env_path = str(tmp_path / ".env")
-    with open(env_path, "w") as f:
-        f.write("WFJB_PHONE=13800000000\n")   # no WFJB_X_TOKEN line
-
-    auth.save_token(tok, "CNA1", token_path=str(tmp_path / ".token.json"), env_path=env_path)
-
-    body = open(env_path).read()
-    assert f"WFJB_X_TOKEN={tok}\n" in body
-    assert body.count("WFJB_X_TOKEN=") == 1
+    assert open(env_path).read() == "WFJB_PHONE=13800000000\nWFJB_X_TOKEN=OLD\n"
+    assert stat.S_IMODE(os.stat(token_path).st_mode) == 0o600
 
 
 def test_save_token_preserves_existing_cna(tmp_path):
@@ -101,23 +85,31 @@ def test_save_replay_template_rejects_foreign_host(tmp_path):
         "host": "evil.example.com",
         "path": "/app/mgop",
         "req_headers": {"api": "mgop.trustway.wfjb.auth", "sign": "abc"},
-        "req_body_b64": "",
+        "body_hex": "",
     }) + "\n")
     with pytest.raises(RuntimeError):
         auth.save_replay_template(str(capture), out_path=str(tmp_path / ".auth_replay.json"))
 
 
-def test_save_replay_template_accepts_real_host(tmp_path):
+def test_save_replay_template_accepts_body_hex_and_legacy_b64_key(tmp_path):
     capture = tmp_path / "mitm.jsonl"
-    capture.write_text(json.dumps({
-        "host": auth.MGOP_HOST,
-        "path": auth.MGOP_PATH,
-        "req_headers": {"api": "mgop.trustway.wfjb.auth", "sign": "abc"},
-        "req_body_b64": "",
-    }) + "\n")
+    # Mix: one legacy req_body_b64, one body_hex — last wfjb.auth wins.
+    capture.write_text(
+        json.dumps({
+            "host": auth.MGOP_HOST, "path": auth.MGOP_PATH,
+            "req_headers": {"api": "mgop.trustway.wfjb.auth", "sign": "old"},
+            "req_body_b64": "7b7d",
+        }) + "\n" + json.dumps({
+            "host": auth.MGOP_HOST, "path": auth.MGOP_PATH,
+            "req_headers": {"api": "mgop.trustway.wfjb.auth", "sign": "new"},
+            "body_hex": "7b2261223a317d",
+        }) + "\n")
     out = str(tmp_path / ".auth_replay.json")
     assert auth.save_replay_template(str(capture), out_path=out) is True
-    assert json.load(open(out))["url"] == auth.MGOP_URL
+    tpl = json.load(open(out))
+    assert tpl["url"] == auth.MGOP_URL
+    assert tpl["body_hex"] == "7b2261223a317d"
+    assert tpl["headers"]["sign"] == "new"
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
 
 

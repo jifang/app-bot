@@ -8,12 +8,12 @@ which owns the single locked replay+classify+persist path. Behaviour:
     timestamp ages out (rs=7003), so this job is also a health monitor rather than
     a promise of unattended long-term refresh.
   * Explicit classification — including SIGNATURE_EXPIRED (rs=7003) separately
-    from PORTAL_EXPIRED and transient gateway/network failures.
+    from AUTH_EXPIRED and transient gateway/network failures.
 
 Exit code (what cron mails on):
   * OK, or a transient failure while the cached token
     is still valid                                                        -> 0
-  * unrecoverable (SIGNATURE_EXPIRED / PORTAL_EXPIRED / BAD_TEMPLATE), or
+  * unrecoverable (SIGNATURE_EXPIRED / AUTH_EXPIRED / BAD_TEMPLATE), or
     nothing usable left                                                   -> 1
 
 When it exits non-zero the operator recovers with `cli login` + a fresh capture.
@@ -27,7 +27,7 @@ from .token_provider import RefreshOutcome, default_provider
 # Non-OK outcomes that never resolve on their own — always surface to the operator.
 _UNRECOVERABLE = {
     RefreshOutcome.SIGNATURE_EXPIRED,
-    RefreshOutcome.PORTAL_EXPIRED,
+    RefreshOutcome.AUTH_EXPIRED,
     RefreshOutcome.BAD_TEMPLATE,
 }
 
@@ -35,7 +35,7 @@ _UNRECOVERABLE = {
 def _recovery_hint(outcome: RefreshOutcome) -> str:
     if outcome is RefreshOutcome.SIGNATURE_EXPIRED:
         return "capture a fresh wfjb.auth request, then run save-replay + refresh"
-    if outcome is RefreshOutcome.PORTAL_EXPIRED:
+    if outcome is RefreshOutcome.AUTH_EXPIRED:
         return "renew the portal login, then capture a fresh wfjb.auth request"
     if outcome is RefreshOutcome.BAD_TEMPLATE:
         return "create a fresh replay template with save-replay"

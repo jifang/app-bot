@@ -14,6 +14,7 @@ import pytest
 
 from police_report import auth
 from police_report.token_provider import (
+    BACKOFF_STEPS_S,
     RefreshOutcome,
     TokenProvider,
     TokenUnavailable,
@@ -63,12 +64,16 @@ class _Clock:
         return self.now
 
 
-def _make(tmp_path, *, poster, clock, cached_exp=None, template=True, margin_s=600):
+def _make(tmp_path, *, poster, clock, cached_exp=None, template=True, margin_s=600,
+          rng=lambda: 0.0):
     replay = tmp_path / ".auth_replay.json"
     if template:
         replay.write_text(json.dumps({
             "url": auth.MGOP_URL,
-            "headers": {"api": "mgop.trustway.wfjb.auth", "sign": "s", "sid": "g"},
+            "headers": {
+                "api": "mgop.trustway.wfjb.auth",
+                "sign": "s", "sid": "g", "ts": "1",
+            },
             "body_hex": "",
         }))
     token_path = tmp_path / ".token.json"
@@ -76,17 +81,18 @@ def _make(tmp_path, *, poster, clock, cached_exp=None, template=True, margin_s=6
         token_path.write_text(json.dumps(
             {"x_token": _jwt(cached_exp), "cna": "C", "exp": cached_exp}))
     env = tmp_path / ".env"
-    env.write_text("WFJB_X_TOKEN=OLD\n")
+    env.write_text("WFJB_PHONE=13800000000\n")
     return TokenProvider(
         token_path=str(token_path), env_path=str(env), replay_path=str(replay),
-        lock_path=str(tmp_path / ".token.lock"), state_path=str(tmp_path / ".token_state.json"),
-        margin_s=margin_s, poster=poster, clock=clock,
+        lock_path=str(tmp_path / ".token.lock"),
+        state_path=str(tmp_path / ".token_state.json"),
+        margin_s=margin_s, poster=poster, clock=clock, rng=rng,
     )
 
 
 # --- classification --------------------------------------------------------
 
-def test_refresh_ok_persists_and_reports_ok(tmp_path):
+def test_refresh_ok_persists_token_json_only(tmp_path):
     clock = _Clock()
     new = _jwt(int(clock.now) + 3600)
     p = _make(tmp_path, poster=_Poster(_Resp(200, body={"code": 200, "data": {"token": new}})),
@@ -94,9 +100,8 @@ def test_refresh_ok_persists_and_reports_ok(tmp_path):
     res = p.refresh(force=True)
     assert res.outcome is RefreshOutcome.OK
     assert res.token == new
-    # persisted to both stores, 0600
     assert json.load(open(p.token_path))["x_token"] == new
-    assert f"WFJB_X_TOKEN={new}" in open(p.env_path).read()
+    assert "WFJB_X_TOKEN" not in open(p.env_path).read()
     assert stat.S_IMODE(os.stat(p.token_path).st_mode) == 0o600
 
 
@@ -131,15 +136,30 @@ def test_refresh_http_429_is_throttled(tmp_path):
     assert p.refresh(force=True).outcome is RefreshOutcome.THROTTLED
 
 
-def test_refresh_non_200_is_portal_expired(tmp_path):
+def test_refresh_http_401_is_auth_expired(tmp_path):
     p = _make(tmp_path, poster=_Poster(_Resp(401, b"nope")), clock=_Clock())
-    assert p.refresh(force=True).outcome is RefreshOutcome.PORTAL_EXPIRED
+    assert p.refresh(force=True).outcome is RefreshOutcome.AUTH_EXPIRED
 
 
-def test_refresh_code_not_200_is_portal_expired(tmp_path):
+def test_refresh_http_502_is_upstream_error(tmp_path):
+    p = _make(tmp_path, poster=_Poster(_Resp(502, b"bad gateway")), clock=_Clock())
+    assert p.refresh(force=True).outcome is RefreshOutcome.UPSTREAM_ERROR
+
+
+def test_refresh_non_json_is_protocol_error(tmp_path):
+    p = _make(tmp_path, poster=_Poster(_Resp(200, b"<html>waf</html>")), clock=_Clock())
+    assert p.refresh(force=True).outcome is RefreshOutcome.PROTOCOL_ERROR
+
+
+def test_refresh_code_401_is_auth_expired(tmp_path):
     p = _make(tmp_path, poster=_Poster(_Resp(200, body={"code": 401, "msg": "expired"})),
               clock=_Clock())
-    assert p.refresh(force=True).outcome is RefreshOutcome.PORTAL_EXPIRED
+    assert p.refresh(force=True).outcome is RefreshOutcome.AUTH_EXPIRED
+
+
+def test_portal_expired_alias_matches_auth_expired():
+    assert RefreshOutcome.PORTAL_EXPIRED is RefreshOutcome.AUTH_EXPIRED
+    assert RefreshOutcome.PORTAL_EXPIRED.value == "AUTH_EXPIRED"
 
 
 def test_refresh_network_error(tmp_path):
@@ -159,7 +179,6 @@ def test_refresh_foreign_host_is_bad_template(tmp_path):
         "url": "https://evil.example.com/app/mgop", "headers": {}, "body_hex": ""}))
     res = p.refresh(force=True)
     assert res.outcome is RefreshOutcome.BAD_TEMPLATE
-    # must NOT have sent captured headers anywhere
     assert p.poster.calls == 0
 
 
@@ -167,7 +186,7 @@ def test_refresh_foreign_host_is_bad_template(tmp_path):
 
 def test_refresh_lazy_returns_cached_without_network(tmp_path):
     clock = _Clock()
-    poster = _Poster()   # would raise-empty if called; assert it is not
+    poster = _Poster()
     p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 3600)
     res = p.refresh(force=False)
     assert res.outcome is RefreshOutcome.OK
@@ -186,35 +205,109 @@ def test_get_token_refreshes_when_stale(tmp_path):
     clock = _Clock()
     new = _jwt(int(clock.now) + 3600)
     poster = _Poster(_Resp(200, body={"code": 200, "data": {"token": new}}))
-    p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 60)  # inside margin
+    p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 60)
     assert p.get_token() == new
     assert poster.calls == 1
 
 
-def test_get_token_returns_still_valid_cached_on_throttle(tmp_path):
+def test_get_token_degraded_returns_still_valid_cached_on_throttle(tmp_path):
     clock = _Clock()
-    cached = _jwt(int(clock.now) + 120)   # near expiry but still valid
-    poster = _Poster(_Resp(429, b""))     # explicit rate limit
+    cached = _jwt(int(clock.now) + 120)
+    poster = _Poster(_Resp(429, b""))
     p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 120)
-    assert p.get_token() == cached        # degrade gracefully, don't raise yet
+    assert p.get_token(allow_degraded=True) == cached
+
+
+def test_get_token_strict_refuses_degraded_below_min_ttl(tmp_path):
+    clock = _Clock()
+    poster = _Poster(_Resp(429, b""))
+    p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 120)
+    with pytest.raises(TokenUnavailable) as e:
+        p.get_token(min_ttl_s=600, allow_degraded=False)
+    assert e.value.outcome is RefreshOutcome.THROTTLED
 
 
 def test_get_token_raises_when_no_usable_token(tmp_path):
     clock = _Clock()
     poster = _Poster(_Resp(200, b"", headers={"rs": "7003"}))
-    p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) - 10)  # expired
+    p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) - 10)
     with pytest.raises(TokenUnavailable) as e:
         p.get_token()
     assert e.value.outcome is RefreshOutcome.SIGNATURE_EXPIRED
 
 
+# --- throttle backoff ------------------------------------------------------
+
+def test_throttle_sets_next_retry_and_blocks_until_then(tmp_path):
+    clock = _Clock()
+    poster = _Poster(_Resp(429, b""), _Resp(429, b""))
+    p = _make(tmp_path, poster=poster, clock=clock, rng=lambda: 0.0)
+    assert p.refresh(force=True).outcome is RefreshOutcome.THROTTLED
+    state = json.load(open(p.state_path))
+    assert state["consecutive_throttle"] == 1
+    assert state["next_retry_at"] == int(clock.now) + BACKOFF_STEPS_S[0]
+    assert state["template_fp"]
+
+    # Second attempt during cooldown must not hit the network.
+    res = p.refresh(force=True)
+    assert res.outcome is RefreshOutcome.THROTTLED
+    assert "backoff" in res.detail
+    assert poster.calls == 1
+
+
+def test_bypass_backoff_replays_during_cooldown(tmp_path):
+    clock = _Clock()
+    new = _jwt(int(clock.now) + 3600)
+    poster = _Poster(
+        _Resp(429, b""),
+        _Resp(200, body={"code": 200, "data": {"token": new}}),
+    )
+    p = _make(tmp_path, poster=poster, clock=clock, rng=lambda: 0.0)
+    p.refresh(force=True)
+    res = p.refresh(force=True, bypass_backoff=True)
+    assert res.outcome is RefreshOutcome.OK
+    assert poster.calls == 2
+
+
+def test_success_clears_backoff(tmp_path):
+    clock = _Clock()
+    new = _jwt(int(clock.now) + 3600)
+    poster = _Poster(
+        _Resp(429, b""),
+        _Resp(200, body={"code": 200, "data": {"token": new}}),
+    )
+    p = _make(tmp_path, poster=poster, clock=clock, rng=lambda: 0.0)
+    p.refresh(force=True)
+    clock.now += BACKOFF_STEPS_S[0] + 1
+    res = p.refresh(force=True)
+    assert res.outcome is RefreshOutcome.OK
+    state = json.load(open(p.state_path))
+    assert state["consecutive_throttle"] == 0
+    assert "next_retry_at" not in state
+    assert state["success_count"] == 1
+
+
 # --- structured state ------------------------------------------------------
 
 def test_state_file_written_every_attempt(tmp_path):
-    clock = _Clock()
     p = _make(tmp_path, poster=_Poster(_Resp(200, b"", headers={"rs": "7003"})),
               clock=_Clock())
     p.refresh(force=True)
     state = json.load(open(p.state_path))
     assert state["outcome"] == "SIGNATURE_EXPIRED"
     assert "attempt_ts" in state
+
+
+def test_token_saved_even_if_state_write_fails(tmp_path, monkeypatch):
+    clock = _Clock()
+    new = _jwt(int(clock.now) + 3600)
+    p = _make(tmp_path, poster=_Poster(_Resp(200, body={"code": 200, "data": {"token": new}})),
+              clock=clock)
+
+    def boom(_result):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(p, "_write_state", boom)
+    res = p.refresh(force=True)
+    assert res.outcome is RefreshOutcome.OK
+    assert json.load(open(p.token_path))["x_token"] == new

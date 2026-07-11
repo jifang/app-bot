@@ -16,79 +16,144 @@ Auth: an `x-token` JWT on every request (+ a `cna` cookie).
 pip install -r police_report/requirements.txt
 ```
 
-## Getting a token
+## Authentication
 
-The `x-token` is minted by the app's mgop gateway (`mgop.trustway.wfjb.auth`). A
-from-scratch login is **not** implemented because it needs (1) the portal SSO
-session `gsid` and (2) a `sign` computed by the mgop native SDK (not reversed).
-See `auth.py` for the exact request shape.
+Every wfjb API call carries an `x-token` JWT (plus a `cna` cookie). Understanding
+where that token comes from — and what does *not* renew automatically — is the key
+to running this unattended.
 
-For now, get the token from a logged-in session:
+### The three layers
 
-- **From a mitmproxy capture** (this repo's capture writes `/tmp/re/mitm.jsonl`):
-  ```bash
-  python -m police_report.cli --from-mitm /tmp/re/mitm.jsonl whoami
-  ```
-  `auth.get_token_from_mitm()` pulls the freshest `x-token` + `cna` for you.
-- **Manually**: copy the `X-Token` header value from any wfjb request and pass
-  `--x-token …` or set `WFJB_X_TOKEN`. Tokens expire (~1h; JWT `exp`).
+```
+  gsid  ─────────────►  x-token  ─────────────►  wfjb-front-api calls
+ (portal SSO session)   (~1h JWT)               (whoami / upload / submit …)
 
-### Refreshing without a re-login (replay)
+ long-lived; minted     minted per-refresh      authenticated by the X-Token
+ by phone/gov SSO        by REPLAYING the        header + cna cookie
+ login in the app        mgop mint call
+```
 
-The `mgop.trustway.wfjb.auth` call is **replayable** — the backend does not
-re-check the captured `sign`/`ts` freshness, so re-POSTing it re-mints a fresh
-`x-token` with no app interaction, as long as the portal session is still valid.
+1. **`gsid`** — a portal SSO session id, obtained when a human logs into the
+   警察叔叔 app (phone+SMS or Alipay/gov SSO). Long-lived (days–weeks), but it
+   *does* eventually expire. It is **not** minted by this toolchain.
+2. **`x-token`** — a ~1 h JWT (has an `exp`), minted by POSTing the mgop gateway
+   with a valid `gsid` + `sign`. This is what every wfjb call actually uses.
+3. **The API calls** — `WfjbClient` sends `X-Token: <jwt>` + `Cookie: cna=<…>`.
+
+### The mint call (mgop)
+
+```
+POST https://mapi-jcss.police.hangzhou.gov.cn/app/mgop
+  api:  mgop.trustway.wfjb.auth
+  sid / sessionid: <gsid>          # the portal session
+  sign:            <md5>           # signed over the request by the mgop NATIVE SDK
+  ts:              <epoch_ms>
+  + appid / extra-ak / ttid / guc-* / user-agent headers   (see auth.py)
+  body: {"platformId": 8}
+  ->  {"code":200, "data":{"token":"<JWT>", "isReal":"1", …}}
+```
+
+Two inputs to this call are **not reproducible offline**, which is why a
+from-scratch login isn't implemented:
+- **`gsid`** comes from the portal SSO login (a separate app flow).
+- **`sign`** is computed by the mgop native SDK (`libmsaoaidsec`/`libalisecuritysdk`);
+  the algorithm/embedded key is **not reversed** (see `FINDINGS-jwztc.md`).
+
+### Replay refresh — why no re-login is needed day-to-day
+
+The mint call is **replayable**: the gateway does **not** re-check the captured
+`sign`/`ts` for freshness. So re-POSTing the *exact same* `(gsid, sign, ts)`
+triple re-mints a fresh ~1 h `x-token` — no app, no proxy, no SMS — **for as long
+as the `gsid` inside it is still a live portal session.** That captured triple is
+saved once as the replay template `.auth_replay.json`:
 
 ```bash
-# once, from a live capture: save the replay template (.auth_replay.json, gitignored)
-python -m police_report.cli save-replay /tmp/re/mitm.jsonl
+# once, from a live mitmproxy capture (this repo's addon writes /tmp/re/mitm.jsonl):
+python -m police_report.cli save-replay /tmp/re/mitm.jsonl   # -> .auth_replay.json
 
-# thereafter, any time the token is stale — no app, no proxy:
-python -m police_report.cli refresh          # writes police_report/.token.json
+# thereafter, any time the token is stale:
+python -m police_report.cli refresh                          # re-mints, persists
 ```
 
-`refresh` writes **both** `police_report/.token.json` and the `WFJB_X_TOKEN` line
-in `.env` through one atomic (mode `0600`) persistence step, so the two stores
-never diverge. Other CLI commands pick up the token automatically (preferring
-whichever store holds the later-expiring JWT), so after `refresh` you can just
-run `whoami` / `submit` without passing `--x-token`.
-If `refresh` ever reports the session expired, re-establish it:
+### token vs `gsid` — what refreshes, and what doesn't
+
+This is the distinction that matters when it breaks:
+
+| You have | Can refresh the **x-token**? | Can renew the **gsid**? |
+|---|---|---|
+| `.auth_replay.json` (live gsid inside) | ✅ yes — `cli refresh`, indefinitely | ❌ no — the gsid is frozen in it |
+| `.auth_replay.json` (gsid expired) | ❌ no — replay returns `PORTAL_EXPIRED` | ❌ no |
+| `cli login` (fresh gsid via phone+SMS) | ❌ no — can't rebuild the template | ✅ gets a gsid, but see below |
+
+`.auth_replay.json` **is enough to refresh the x-token**, but it can **never**
+renew the `gsid` — replaying reuses the frozen one, it doesn't mint a new session.
+When the portal session finally expires, the **only** fix is a fresh mitmproxy
+**capture** of a logged-in `wfjb.auth` request (→ `save-replay`). `cli login` can
+obtain a new gsid, but it **cannot** rebuild a working template from it, because a
+new gsid needs a new matching `sign` and `sign` is native-SDK-only. So `login`
+persists a session (`.session.json`) but does not, by itself, restore refresh.
+
+**When has the gsid died?** `cli refresh` prints `PORTAL_EXPIRED`,
+`.token_state.json` records `"outcome": "PORTAL_EXPIRED"`, and the cron exits
+non-zero. That's the signal to re-capture.
+
+### How the client manages the token (`TokenProvider`)
+
+All token handling goes through one file-locked `TokenProvider`
+(`token_provider.py`), so state can never diverge across the CLI and the cron:
+
+- **Lazy** — returns the cached JWT while it has >~10 min of life; only replays
+  when it's near expiry, so a frequent cron doesn't burn the gateway's per-triple
+  replay quota.
+- **Explicit outcomes** — every attempt is classified `OK` / `THROTTLED` /
+  `PORTAL_EXPIRED` / `BAD_TEMPLATE` / `NETWORK_ERROR` and recorded in
+  `.token_state.json` (non-secret) for the operator/cron.
+- **Atomic persistence** — a new token is written to **both** `.token.json` and
+  the `WFJB_X_TOKEN` line in `.env` together, mode `0600`.
+- **Safe retries** — idempotent reads (`whoami`/`dict`/`history`) refresh and
+  retry **once** on an auth failure; `submit` refreshes *before* filing but
+  **never** retries afterward (a blind retry could file a duplicate real report).
+- **Throttling** — the gateway answers a too-fast replay with an empty `200`.
+  Harmless while the cached token is still valid; if it's near expiry and can't be
+  renewed, `refresh`/the cron exits non-zero so you know to re-capture.
+
+Callers don't touch any of this — the CLI attaches a provider automatically. After
+`refresh`, just run `whoami` / `submit` with no `--x-token`.
+
+### Bootstrapping the first token / re-capturing
+
+The device-side capture (Magisk DenyList, mitmproxy CA as a system cert, the app
+proxied with **China-direct routing**, then open the wfjb H5 once) is documented
+in [`../FINDINGS-jwztc.md`](../FINDINGS-jwztc.md) §3. Once you have a capture:
 
 ```bash
-python -m police_report.cli login          # portal SSO (uses WFJB_PHONE), saves session
+python -m police_report.cli save-replay /tmp/re/mitm.jsonl   # durable template
+python -m police_report.cli refresh                          # mint the first token
+python -m police_report.cli whoami                           # verify the account
 ```
 
-then re-capture the `wfjb.auth` request once (see above) so `refresh` works again.
-(`login` alone can't mint an `x-token`: the mgop `sign` from the app's native SDK
-is still required to rebuild the replay template — see `auth.py`.)
-Notes:
-- `refresh` hits `mapi-jcss.police.hangzhou.gov.cn` directly, so the host must be
-  able to reach it (China-direct routing — see FINDINGS §3).
-- All refresh goes through one `TokenProvider` (`token_provider.py`) under a file
-  lock. It is **lazy** — it replays only when the cached JWT is within ~10 min of
-  expiry — and classifies each attempt explicitly as `OK` / `THROTTLED` /
-  `PORTAL_EXPIRED` / `BAD_TEMPLATE` / `NETWORK_ERROR`, recording the result in
-  `police_report/.token_state.json` (gitignored) for the operator/cron.
-- The gateway **throttles rapid identical replays** with an empty `200`. If the
-  cached token is still valid, that's harmless (retry later); if it's near expiry
-  and can't be renewed, `refresh`/the cron exits non-zero so you re-capture.
-- Reads (`whoami`, `dict`, `history`) auto-refresh and retry once on an auth
-  failure. `submit` refreshes *before* filing but never retries afterward — a
-  blind retry could file a duplicate real report.
+Alternatives that skip the template (one-off use, token expires ~1 h):
 
-### `.env` (gitignored)
+- `--from-mitm /tmp/re/mitm.jsonl` — pull the freshest `x-token` + `cna` straight
+  from a capture (`auth.get_token_from_mitm`).
+- `--x-token …` / `WFJB_X_TOKEN=…` — paste an `X-Token` value from a live session.
 
-`police_report/.env` holds reporter identity + the current token — never committed:
+> `refresh` and the mint call hit `mapi-jcss.police.hangzhou.gov.cn` directly, so
+> the host must egress **China-local**, or the gov WAF returns unreachable IPs
+> (`502` / `网络错误`). See FINDINGS §3.
 
-```
-WFJB_PHONE=...      # pre-filled into report.json when phone/name are blank/FILL_ME
-WFJB_NAME=...
-WFJB_X_TOKEN=...    # current token (transient); refresh with `cli refresh`
-WFJB_CNA=...
-```
+### Auth-related files (all gitignored)
 
-The CLI auto-loads it. Durable refresh material lives in `.auth_replay.json`
-(also gitignored) — that, not the token in `.env`, is what `refresh` replays.
+| file | holds | secret? |
+|---|---|---|
+| `.auth_replay.json` | the frozen `(gsid, sign, ts)` mint request — the durable refresh material | **yes** |
+| `.token.json` | current `x_token` + `cna` + decoded `exp` | **yes** |
+| `.env` | reporter identity (`WFJB_PHONE`/`WFJB_NAME`) + `WFJB_X_TOKEN`/`WFJB_CNA` | **yes** |
+| `.session.json` | portal login result from `cli login` (gsid/tokens) | **yes** |
+| `.token_state.json` | last refresh outcome + timestamps (for the operator/cron) | no |
+
+`.env` is auto-loaded by the CLI. Note the authoritative refresh material is
+`.auth_replay.json`, **not** the token in `.env` — that token is transient.
 
 ## Auto-fill from dashcam video (OCR)
 

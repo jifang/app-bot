@@ -4,10 +4,14 @@ FULL request/response (headers+body) -> /tmp/re/mitm.jsonl on disk.
 Console: method + host + path + body KEY NAMES only (no token/phone/session values).
 Highlights the police portal + upload/OSS hosts; mutes pure telemetry.
 """
-import json, re
+import json, os, re
 from mitmproxy import http
 
-OUT = open("/tmp/re/mitm.jsonl", "a", buffering=1)
+OUT_PATH = os.environ.get("MITM_OUT", "/tmp/re/mitm.jsonl")
+AUTH_ONLY = os.environ.get("MITM_AUTH_ONLY") == "1"
+os.makedirs(os.path.dirname(OUT_PATH) or ".", exist_ok=True)
+OUT = os.fdopen(os.open(OUT_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+                "a", buffering=1)
 TELEMETRY = re.compile(r"umeng\.com|uc\.cn|beacon-api|aaid|applog|quicktracking|unify_logs|/collect", re.I)
 INTERESTING = re.compile(r"police\.hangzhou\.gov\.cn|mpaas|aliyuncs|oss|vod|upload", re.I)
 n = {"i": 0}
@@ -33,9 +37,17 @@ def _keys(body: bytes, ctype: str):
 
 def response(flow: http.HTTPFlow):
     req, resp = flow.request, flow.response
+    req_headers = dict(req.headers)
+    normalized = {k.lower(): v for k, v in req_headers.items()}
+    is_wfjb_auth = (
+        req.host == "mapi-jcss.police.hangzhou.gov.cn"
+        and "wfjb.auth" in normalized.get("api", "")
+    )
+    if AUTH_ONLY and not is_wfjb_auth:
+        return
     rec = {
         "method": req.method, "host": req.host, "path": req.path,
-        "req_headers": dict(req.headers), "req_body_b64": req.content.hex() if req.content else "",
+        "req_headers": req_headers, "req_body_b64": req.content.hex() if req.content else "",
         "status": resp.status_code, "resp_headers": dict(resp.headers),
         "resp_body": resp.get_text(strict=False)[:200000] if resp.content else "",
     }

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# install_cron.sh — install the auto-refresh cron job.
+# install_cron.sh — install the token health-check / best-effort refresh job.
 #
-# Schedule: every 15 minutes. The gateway's per-replay throttle (see
-# auto_refresh.py) is fine with this cadence. A `cron` MAILTO will receive
-# non-zero exits (network error or gsid dead).
+# Schedule: every 15 minutes. A frozen replay cannot renew after MGOP's signed
+# timestamp window (rs=7003), so this job primarily surfaces that recovery action;
+# it does not remove the need for a fresh signed capture. A `cron` MAILTO will
+# receive non-zero exits (signature expired, portal dead, or no usable token).
 #
 # Re-run this script any time to reset the schedule.
 set -euo pipefail

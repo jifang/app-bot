@@ -29,8 +29,9 @@ def _jwt(exp: int) -> str:
 
 
 class _Resp:
-    def __init__(self, status=200, content=b"", body=None):
+    def __init__(self, status=200, content=b"", body=None, headers=None):
         self.status_code = status
+        self.headers = headers or {}
         if body is not None:
             content = json.dumps(body).encode()
         self.content = content
@@ -99,8 +100,34 @@ def test_refresh_ok_persists_and_reports_ok(tmp_path):
     assert stat.S_IMODE(os.stat(p.token_path).st_mode) == 0o600
 
 
-def test_refresh_empty_200_is_throttled(tmp_path):
+def test_refresh_empty_200_without_gateway_status_is_gateway_error(tmp_path):
     p = _make(tmp_path, poster=_Poster(_Resp(200, b"")), clock=_Clock())
+    assert p.refresh(force=True).outcome is RefreshOutcome.GATEWAY_ERROR
+
+
+def test_refresh_rs_7003_is_signature_expired(tmp_path):
+    p = _make(tmp_path, poster=_Poster(_Resp(
+        200, b"", headers={
+            "rs": "7003",
+            "memo": "%E9%AA%8C%E7%AD%BE%E6%97%B6%E9%97%B4%E6%88%B3%E6%A0%A1%E9%AA%8C%E5%A4%B1%E8%B4%A5",
+        })), clock=_Clock())
+    res = p.refresh(force=True)
+    assert res.outcome is RefreshOutcome.SIGNATURE_EXPIRED
+    assert "rs=7003" in res.detail
+    assert "验签时间戳校验失败" in res.detail
+
+
+def test_refresh_rs_4001_is_gateway_error_not_throttle(tmp_path):
+    p = _make(tmp_path, poster=_Poster(_Resp(
+        200, b"", headers={"rs": "4001", "memo": "%E6%9C%8D%E5%8A%A1%E8%AF%B7%E6%B1%82%E8%B6%85%E6%97%B6"})),
+        clock=_Clock())
+    res = p.refresh(force=True)
+    assert res.outcome is RefreshOutcome.GATEWAY_ERROR
+    assert "服务请求超时" in res.detail
+
+
+def test_refresh_http_429_is_throttled(tmp_path):
+    p = _make(tmp_path, poster=_Poster(_Resp(429, b"")), clock=_Clock())
     assert p.refresh(force=True).outcome is RefreshOutcome.THROTTLED
 
 
@@ -167,26 +194,27 @@ def test_get_token_refreshes_when_stale(tmp_path):
 def test_get_token_returns_still_valid_cached_on_throttle(tmp_path):
     clock = _Clock()
     cached = _jwt(int(clock.now) + 120)   # near expiry but still valid
-    poster = _Poster(_Resp(200, b""))     # throttled
+    poster = _Poster(_Resp(429, b""))     # explicit rate limit
     p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) + 120)
     assert p.get_token() == cached        # degrade gracefully, don't raise yet
 
 
 def test_get_token_raises_when_no_usable_token(tmp_path):
     clock = _Clock()
-    poster = _Poster(_Resp(200, b""))     # throttled
+    poster = _Poster(_Resp(200, b"", headers={"rs": "7003"}))
     p = _make(tmp_path, poster=poster, clock=clock, cached_exp=int(clock.now) - 10)  # expired
     with pytest.raises(TokenUnavailable) as e:
         p.get_token()
-    assert e.value.outcome is RefreshOutcome.THROTTLED
+    assert e.value.outcome is RefreshOutcome.SIGNATURE_EXPIRED
 
 
 # --- structured state ------------------------------------------------------
 
 def test_state_file_written_every_attempt(tmp_path):
     clock = _Clock()
-    p = _make(tmp_path, poster=_Poster(_Resp(200, b"")), clock=_Clock())
+    p = _make(tmp_path, poster=_Poster(_Resp(200, b"", headers={"rs": "7003"})),
+              clock=_Clock())
     p.refresh(force=True)
     state = json.load(open(p.state_path))
-    assert state["outcome"] == "THROTTLED"
+    assert state["outcome"] == "SIGNATURE_EXPIRED"
     assert "attempt_ts" in state

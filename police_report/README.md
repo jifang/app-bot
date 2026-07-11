@@ -81,19 +81,25 @@ This is the distinction that matters when it breaks:
 
 | You have | Can refresh the **x-token**? | Can renew the **gsid**? |
 |---|---|---|
-| `.auth_replay.json` (live gsid inside) | ✅ yes — `cli refresh`, indefinitely | ❌ no — the gsid is frozen in it |
+| `.auth_replay.json` (fresh signed timestamp) | ✅ yes — `cli refresh`, during the gateway's timestamp window | ❌ no — the gsid is frozen in it |
+| `.auth_replay.json` (stale `ts`/`sign`) | ❌ no — replay returns `SIGNATURE_EXPIRED` (`rs=7003`) | ❌ no |
 | `.auth_replay.json` (gsid expired) | ❌ no — replay returns `PORTAL_EXPIRED` | ❌ no |
 | `cli login` (fresh gsid via phone+SMS) | ❌ no — can't rebuild the template | ✅ gets a gsid, but see below |
 
-`.auth_replay.json` **is enough to refresh the x-token**, but it can **never**
-renew the `gsid` — replaying reuses the frozen one, it doesn't mint a new session.
-When the portal session finally expires, the **only** fix is a fresh mitmproxy
-**capture** of a logged-in `wfjb.auth` request (→ `save-replay`). `cli login` can
-obtain a new gsid, but it **cannot** rebuild a working template from it, because a
-new gsid needs a new matching `sign` and `sign` is native-SDK-only. So `login`
-persists a session (`.session.json`) but does not, by itself, restore refresh.
+`.auth_replay.json` reuses one frozen `(gsid, sign, ts)` triple. It can mint an
+x-token only while MGOP accepts that signed timestamp. Once MGOP returns an empty
+HTTP 200 with response header `rs=7003` (验签时间戳校验失败), waiting and retrying the
+same template cannot help: capture a fresh `wfjb.auth`, run `save-replay`, then
+`refresh`. This does **not** prove that the gsid expired, and the portal
+`refreshToken` is not involved.
 
-**When has the gsid died?** `cli refresh` prints `PORTAL_EXPIRED`,
+If the `gsid` itself expires, a fresh portal login is also needed. `cli login` can
+obtain that gsid, but it **cannot** rebuild a working template by itself because a
+new matching `sign` is native-SDK-only.
+
+**When has the signature aged out?** `cli refresh` prints `SIGNATURE_EXPIRED` and
+the recovery is capture → `save-replay` → `refresh`. **When has the gsid died?**
+`cli refresh` prints `PORTAL_EXPIRED`,
 `.token_state.json` records `"outcome": "PORTAL_EXPIRED"`, and the cron exits
 non-zero. That's the signal to re-capture.
 
@@ -102,20 +108,22 @@ non-zero. That's the signal to re-capture.
 All token handling goes through one file-locked `TokenProvider`
 (`token_provider.py`), so state can never diverge across the CLI and the cron:
 
-- **Lazy** — returns the cached JWT while it has >~10 min of life; only replays
-  when it's near expiry, so a frequent cron doesn't burn the gateway's per-triple
-  replay quota.
-- **Explicit outcomes** — every attempt is classified `OK` / `THROTTLED` /
-  `PORTAL_EXPIRED` / `BAD_TEMPLATE` / `NETWORK_ERROR` and recorded in
+- **Lazy** — returns the cached JWT while it has >~10 min of life. Near expiry it
+  tries the saved replay, but that replay is expected to fail with `rs=7003` once
+  its signed timestamp is old. This is diagnosis/fail-closed behavior, not durable
+  unattended renewal.
+- **Explicit outcomes** — every attempt distinguishes `SIGNATURE_EXPIRED`
+  (`rs=7003`) from `PORTAL_EXPIRED`, explicit HTTP `THROTTLED`, transient
+  `GATEWAY_ERROR` / `NETWORK_ERROR`, and `BAD_TEMPLATE`, and records it in
   `.token_state.json` (non-secret) for the operator/cron.
 - **Atomic persistence** — a new token is written to **both** `.token.json` and
   the `WFJB_X_TOKEN` line in `.env` together, mode `0600`.
 - **Safe retries** — idempotent reads (`whoami`/`dict`/`history`) refresh and
   retry **once** on an auth failure; `submit` refreshes *before* filing but
   **never** retries afterward (a blind retry could file a duplicate real report).
-- **Throttling** — the gateway answers a too-fast replay with an empty `200`.
-  Harmless while the cached token is still valid; if it's near expiry and can't be
-  renewed, `refresh`/the cron exits non-zero so you know to re-capture.
+- **Empty HTTP 200** — MGOP puts the real failure in response headers. `rs=7003`
+  means the signed timestamp expired; `rs=4001` is a gateway timeout. An empty
+  body is no longer guessed to mean throttling.
 
 Callers don't touch any of this — the CLI attaches a provider automatically. After
 `refresh`, just run `whoami` / `submit` with no `--x-token`.

@@ -61,7 +61,7 @@ video-upload → submit flow are documented in **[`police_report/README.md`](pol
 
 Key facts recorded there, worth flagging here:
 - JWT is minted by `POST mapi-jcss.police.hangzhou.gov.cn/app/mgop` (`api: mgop.trustway.wfjb.auth`); needs a portal SSO `gsid` + an mgop `sign` (native SDK, **not reversed**) → from-scratch login not automated; token taken from a live session.
-- **The mint call is replayable** (verified): the backend does **not** re-check the captured `sign`/`ts` freshness, so re-POSTing the exact `wfjb.auth` request re-mints a fresh ~1h `x-token` with **no app interaction and no re-login** — as long as the portal session stays valid. This sidesteps the un-reversed `sign` for token *refresh*. See `auth.save_replay_template` / `refresh_token` and `cli refresh`. Caveat: the gateway throttles rapid identical replays with an empty `200` body — `refresh_token` retries with backoff.
+- **The mint call is only temporarily replayable.** Current evidence (2026-07-11) shows MGOP enforces the frozen signed timestamp: an aged `(gsid, sign, ts)` returns an empty HTTP `200` with response header `rs=7003` (`验签时间戳校验失败`). This is not throttling and does not show that the gsid expired; waiting cannot repair the matching `ts`/`sign`. Recovery is a fresh mitm capture of `wfjb.auth` → `save-replay` → `refresh`. Other empty-200 failures also use headers (observed `rs=4001` for gateway timeout), so the body alone must not be classified.
 - Submit body **swaps lat/lng**: real longitude goes in JSON `latitude`, real latitude in `longitude`. Reproduce exactly.
 
 ## Files (this session)
@@ -78,5 +78,5 @@ Captures (`/tmp/re/*.jsonl`) and `police_report/.token.json` / `.auth_replay.jso
 
 ## Open items
 
-- Reverse the mgop `sign` + capture the portal SSO `gsid` flow → full login-from-scratch. **Partially obviated for refresh** by the replay trick (`refresh_token` re-mints without app/re-login while the portal session lives); full from-scratch login still needs the `sign`. Not scheduled.
+- Reverse or host the mgop `sign` implementation so a current `ts/sign` can be generated without a fresh device capture. Portal SSO login is partly implemented, but a fresh gsid alone cannot rebuild the signed mint request.
 - `submit` files a **real** police report; client fails closed (`--confirm` required). Do not file false reports. (One real report filed this session: 回执 xlh 1493 / id 683341.)

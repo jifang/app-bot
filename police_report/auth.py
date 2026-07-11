@@ -160,9 +160,9 @@ def save_replay_template(jsonl_path: str, out_path: str = REPLAY_PATH) -> bool:
     """
     Extract the app's captured `mgop.trustway.wfjb.auth` request (URL + headers +
     body) from a mitm capture and save it as a replay template. The captured
-    `sign`/`sid`/`ts` are reused on replay; the wfjb backend does NOT re-check
-    their freshness (verified), so replaying re-mints a token without any app
-    interaction — as long as the underlying portal session stays valid.
+    `sign`/`sid`/`ts` are reused on replay. MGOP now enforces the signed timestamp
+    (observed rs=7003), so this template is short-lived even when the underlying
+    portal session remains valid; a fresh signed capture is then required.
     Returns True if a template was saved.
     """
     tpl = None

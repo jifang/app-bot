@@ -45,6 +45,16 @@ def test_network_error_with_valid_token_exits_zero():
     assert auto_refresh.main(provider=p) == 0
 
 
+def test_gateway_error_with_valid_token_exits_zero():
+    p = _FakeProvider(RefreshOutcome.GATEWAY_ERROR, ttl=200)
+    assert auto_refresh.main(provider=p) == 0
+
+
+def test_signature_expired_exits_one_even_if_token_valid():
+    p = _FakeProvider(RefreshOutcome.SIGNATURE_EXPIRED, ttl=300)
+    assert auto_refresh.main(provider=p) == 1
+
+
 def test_portal_expired_exits_one_even_if_token_valid():
     p = _FakeProvider(RefreshOutcome.PORTAL_EXPIRED, ttl=300)  # session dead, unrecoverable
     assert auto_refresh.main(provider=p) == 1

@@ -4,8 +4,8 @@ Replaces the two divergent refresh paths (auth.refresh_token + auto_refresh) wit
 one implementation that, under an inter-process file lock:
 
   * returns the cached JWT while it has comfortable TTL (lazy — no wasted replay),
-  * otherwise replays the one saved MGOP request and classifies the result
-    explicitly (OK / THROTTLED / PORTAL_EXPIRED / BAD_TEMPLATE / NETWORK_ERROR),
+  * otherwise replays the one saved MGOP request and classifies the result,
+    including signed-timestamp expiry (rs=7003) separately from portal expiry,
   * persists a new token atomically at mode 0600 (via auth.save_token), and
   * records the outcome in a non-secret `.token_state.json` for the operator/cron.
 
@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
+from urllib.parse import unquote
 
 import requests
 
@@ -44,7 +45,9 @@ DEFAULT_MARGIN_S = 10 * 60
 
 class RefreshOutcome(Enum):
     OK = "OK"                       # a fresh token was minted (or cache is fresh)
-    THROTTLED = "THROTTLED"         # gateway per-triple quota hit (empty 200)
+    THROTTLED = "THROTTLED"         # explicit rate limit (HTTP 429)
+    SIGNATURE_EXPIRED = "SIGNATURE_EXPIRED"  # rs=7003; fresh signed capture required
+    GATEWAY_ERROR = "GATEWAY_ERROR"  # transient/unknown MGOP gateway failure
     PORTAL_EXPIRED = "PORTAL_EXPIRED"   # gsid/session dead — needs re-capture/login
     BAD_TEMPLATE = "BAD_TEMPLATE"   # missing/poisoned/undecodable replay template
     NETWORK_ERROR = "NETWORK_ERROR"     # transport failure reaching the gateway
@@ -143,22 +146,65 @@ class TokenProvider:
         except requests.RequestException as e:
             return RefreshResult(RefreshOutcome.NETWORK_ERROR, None, str(e))
 
-        if resp.status_code != 200:
-            return RefreshResult(RefreshOutcome.PORTAL_EXPIRED, None,
-                                 f"http {resp.status_code} (gsid likely dead)")
-        if not resp.content:
+        response_headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+        rs = response_headers.get("rs", "").strip()
+        gateway_detail = self._gateway_detail(response_headers)
+
+        if resp.status_code == 429:
             return RefreshResult(RefreshOutcome.THROTTLED, None,
-                                 "empty 200 — replay quota exhausted for this triple")
+                                 gateway_detail or "http 429 rate limited")
+        if resp.status_code in (401, 403):
+            return RefreshResult(RefreshOutcome.PORTAL_EXPIRED, None,
+                                 gateway_detail or f"http {resp.status_code} (gsid likely dead)")
+        if resp.status_code != 200:
+            return RefreshResult(RefreshOutcome.GATEWAY_ERROR, None,
+                                 gateway_detail or f"http {resp.status_code}")
+        if not resp.content:
+            # MGOP reports failures in response headers while deliberately sending
+            # an empty HTTP 200 body. rs=7003 is not throttling: the frozen ts/sign
+            # pair has aged out and can never recover by waiting or retrying.
+            if rs == "7003":
+                return RefreshResult(
+                    RefreshOutcome.SIGNATURE_EXPIRED, None,
+                    gateway_detail or
+                    "rs=7003 signature timestamp validation failed; fresh wfjb.auth capture required")
+            return RefreshResult(
+                RefreshOutcome.GATEWAY_ERROR, None,
+                gateway_detail or "empty 200 without MGOP rs header")
         try:
             j = resp.json()
         except ValueError:
-            return RefreshResult(RefreshOutcome.PORTAL_EXPIRED, None,
+            return RefreshResult(RefreshOutcome.GATEWAY_ERROR, None,
                                  f"non-JSON 200: {resp.text[:120]}")
+        body_rs = str(j.get("rs", "")).strip()
+        if body_rs == "7003":
+            return RefreshResult(
+                RefreshOutcome.SIGNATURE_EXPIRED, None,
+                "rs=7003 signature timestamp validation failed; fresh wfjb.auth capture required")
         token = (j.get("data") or {}).get("token")
         if j.get("code") == 200 and token:
             return RefreshResult(RefreshOutcome.OK, token, "minted")
-        return RefreshResult(RefreshOutcome.PORTAL_EXPIRED, None,
+        if j.get("code") in (401, 403):
+            return RefreshResult(RefreshOutcome.PORTAL_EXPIRED, None,
+                                 f"declined: code={j.get('code')} msg={j.get('msg')}")
+        return RefreshResult(RefreshOutcome.GATEWAY_ERROR, None,
                              f"declined: code={j.get('code')} msg={j.get('msg')}")
+
+    @staticmethod
+    def _gateway_detail(headers: dict[str, str]) -> str:
+        """Decode MGOP's empty-response diagnostic headers without guessing.
+
+        Observed failures use an empty HTTP 200 body and carry `rs`, URL-encoded
+        `memo`, and `tips` headers. Preserve those facts in operator state so
+        callers can distinguish an expired signature from an expired portal.
+        """
+        parts = []
+        if headers.get("rs"):
+            parts.append(f"rs={headers['rs']}")
+        for key in ("memo", "tips"):
+            if headers.get(key):
+                parts.append(f"{key}={unquote(headers[key])}")
+        return " ".join(parts)
 
     def cached_ttl(self) -> Optional[float]:
         """Seconds until the cached token expires (negative if expired), or None

@@ -7,6 +7,7 @@
     "build": "frida-compile ../recon.entry.js -o ../recon.bundle.js"
   },
   "dependencies": {
-    "frida-java-bridge": "*"
+    "frida-compile": "^19.0.5",
+    "frida-java-bridge": "^7.0.13"
   }
 }

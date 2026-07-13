@@ -15,16 +15,21 @@ and cookies; we don't yet have a hook that lifts them out so the standalone
 client can attach them to its forged requests.
 
 **Approach:**
-1. Re-run `tap_sign.entry.js` (already exists, dropped earlier) — extend it to
-   also tap `com.alipay.android.phone.mobilesecurity.adapter.SecurityGuard`
-   for `getApdid`/`getAsac`/`signWithSecurityGuardSign` and dump every value
-   to a logfile alongside the body.
-2. From the `sf_net.jsonl` we already captured (`code: 1` running-app requests)
-   extract a single live request's full URL + body + the headers that show in
-   `tap.entry.js`'s Ajx3 hook (XHR variant). Match the timestamp against the
-   SecurityGuard token dump to align them.
-3. Store the bundle per request — `request → {headers, cookies, wua, asac}` —
-   in `/tmp/re/session.json`. The Python client reads it before each call.
+1. Bundle a fresh frida hook (`tap_session.entry.js`) that intercepts:
+   - `serverkey.sign` and `MessageDigest.update` (already known to work from the
+     prior sign-rebuild round) — re-use to mark the request boundary in time
+   - `com.alipay.android.phone.mobilesecurity.adapter.SecurityGuard.getApdid`,
+     `getAsac`, `signWithSecurityGuardSign` — SecurityGuard surface; dump every
+     call's args+ret
+   - `java.net.CookieManager` (or `okhttp3.CookieJar`) — capture the cookie
+     set the running app has
+2. From `sf_net.jsonl` we already captured (`code: 1` running-app requests) pick
+   a single live request's URL + body + headers (XHR variant from `tap.entry.js`'s
+   Ajx3 hook), align its timestamp with the SecurityGuard dump — that gives one
+   end-to-end reference bundle.
+3. Persist the bundle per request — `request → {headers, cookies, wua, asac,
+   apdid, sign}` — in `/tmp/re/session.json`. The Python client loads it
+   before each call and attaches everything to its forged request.
 
 **Stub location:** `/Users/ji/Projects/app-bot/session.json` (gitignored).
 **Deliverable:** `amap_client.py call` returns `data: {...}` instead of `code: 14`.

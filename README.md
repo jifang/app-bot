@@ -38,20 +38,25 @@ ex.call({path: "/ws/boss/...", body: "adcode=…", aosSign: {...}})
 
 Files:
 
-| Path | Purpose |
-|------|---------|
-| `oracle_server.py` | HTTP bridge: `sign` / `amapEncode` / `amapDecode` / `aosKey` / `version` |
-| `oracle.bundle.js` | frida bundle the server uses (built from `oracle.entry.js`) |
-| `amap_client.py` | offline sign + build wire URL; or send via `requests` |
-| `driver_fetch2.entry.js` | Ajx3 `ModuleRequest.fetch` hijack — run inside app for end-to-end |
-| `FINDINGS.md` | full RE log + endpoint map + sign formula + what's still pending |
+| Path | Role |
+|------|------|
+| `oracle_server.py` | HTTP bridge: `sign` / `amapEncode` / `amapDecode` / `aosKey` / `version` over `127.0.0.1:8765` |
+| `oracle.entry.js` + `oracle.bundle.js` | frida bundle the server hot-loads (enumerate `serverkey`/`AosEncryptor`) |
+| `amap_client.py` | pure-Python sign + wire-URL build + `requests` caller (CLI: `build` / `call`) |
+| `driver_fetch2.entry.js` + `driver_fetch2.bundle.js` | Ajx3 `ModuleRequest.fetch` hijack — RPC `ex.call({path, body, aosSign})` to dispatch through the live app's sign/session |
+| `FINDINGS.md` | chronological RE log + endpoint map + sign formula + status banner |
 | `TODO.md` | ranked pending work with retry-instructions |
-| `FINDINGS-jwztc.md` | police-app RE log |
+| `*.entry.js` (`recon`/`sfnet`/`tap`/`tap.entry`/etc.) | earlier capture scripts — rebuild any missing `.bundle.js` via `compile/` |
 
 ---
 
 ## Police-app quick start
 
-See `police_report/README.md`. The `cli.py` accepts `refresh` (replay-based,
-current production path) and `mint` (new; offline/signer/android minter)
-subcommands; `WFJB_MINTER` env var picks the active minter.
+See `police_report/README.md`. The `cli.py` accepts:
+- `refresh` — replay-based, current production path
+- `mint --via {auto|offline|signer|android}` — alternative minter path
+- `login`, `whoami`, `submit`, `report-prep`, …
+
+`WFJB_MINTER` env var picks the active minter (`offline` by default; the
+fallback path is exercised automatically when `refresh` classifies
+`SIGNATURE_EXPIRED` / `BAD_TEMPLATE`).

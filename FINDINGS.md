@@ -1,4 +1,32 @@
-# 高德地图 API RE — Findings & Status (as of 2026-07-03)
+# 高德地图 API RE — Findings
+
+Chronological RE log. Sections are time-ordered. Status-as-of-now is in
+[`README.md`](./README.md) and pending work is in [`TODO.md`](./TODO.md).
+
+## Status (2026-07-12)
+
+- **Sign reverse** ✓ — `md5("amap7a" + extra + "@" + aosKey)` reproduced offline.
+  Re-derivation in §"AOS sign — full reverse" below.
+- **amapEncode** ✗ — key is in `libserverkey.so` (OLLVM); still runs via the frida
+  oracle through `oracle_server.py`.
+- **End-to-end replay** ✓ — `amap_client.py build` builds wire URLs;
+  `amap_client.py call` POSTs and gets `HTTP 200` + JSON. Live cookie / Ap-Tid /
+  asac / wua still missing → server returns `code 14 用户登录校验失败`.
+- **In-app driver** ✓ — `driver_fetch2.entry.js` delegates to the running app's
+  `ModuleRequest.fetch`; reaches the same `code 14` because the live session is
+  now stale.
+
+File map (full list in [`README.md`](./README.md)):
+
+| Path | Role |
+|------|------|
+| `oracle_server.py` | HTTP bridge to the frida-attached AOS crypto oracle |
+| `oracle.entry.js` / `oracle.bundle.js` | enumerate `serverkey`/`AosEncryptor`; RPC sign / amapEncode / amapDecode / aosKey |
+| `amap_client.py` | pure-Python request builder + caller |
+| `driver_fetch2.entry.js` / `driver_fetch2.bundle.js` | Ajx3 `ModuleRequest.fetch` hijack |
+| `recon.entry.js` / `sfnet.entry.js` / … | earlier capture scripts (workflow unchanged; rebuild `.bundle.js` via `compile/`) |
+| `FINDINGS.md` (this file) | the chronology |
+| `TODO.md` | ranked pending work |
 
 ## Goal
 Reverse-engineer 高德打车 API calls (ride-hailing module lives inside 高德地图,
@@ -14,11 +42,13 @@ package `com.autonavi.minimap`). Intent: call their API directly.
 ## Devices available
 | Device | Detail | Verdict for RE |
 |---|---|---|
-| Samsung SM-S711B (S23 FE) | arm64-v8a, Android 16, **unrooted, Knox** | Android is the right platform, but no root |
+| Samsung SM-S711B (S23 FE) | arm64-v8a, Android 16, **unrooted, Knox** | android is the right platform, but no root |
 | iPhone 11 Pro | A13, iOS 18.6.2 | **Dead end** — A13 not checkm8-able, no public JB for 18.x, no frida-server |
+| **Redmi Note 8 (ginkgo)** *(added later)* | arm64-v8a, Android 11, rooted (Magisk 28.1, Zygisk on) | **the working rig** — all post-2026-07-06 captures come from this device |
 
-adb: `/Users/jifang/Library/Android/sdk/platform-tools/adb`
-Device id: `RZCWB0V8NZN`
+If you're picking this up: rediscover the Redmi Note 8 (or any rooted
+arm64 Android with frida-server 17.15.3 at `/data/local/tmp/fs17`). The
+Samsung and iPhone are dead-ends.
 
 ## Toolchain installed (macOS arm64)
 - frida 17.15.3 (core + frida-tools) — installed via **Aliyun mirror** (PyPI + Tsinghua both failed/403 on China network)

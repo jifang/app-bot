@@ -1,8 +1,22 @@
-# 警察叔叔 (com.hzpd.jwztc) API RE — Findings & Status (2026-07-06)
+# 警察叔叔 (com.hzpd.jwztc) API RE — Findings & Status (last touched 2026-07-12)
 
 Hangzhou police app. Goal: automate **违章举报 (traffic-violation report)**.
 API client lives in [`police_report/`](police_report/README.md); this doc records how
 we got the traffic and the protections we had to beat.
+
+## Status (2026-07-12)
+
+- **Authentication** — refresh path via *fresh* mgop signature capture is
+  *temporarily* replayable (signature `ts` carries time validity; aged
+  `(gsid, sign, ts)` returns empty `200` + `rs=7003`). Recovery: replay-refresh
+  via `cli refresh` / `cli save-replay`.
+- **Minter fallback** — when replay classifies stale, `TokenProvider` now
+  falls through to a `minter=` callable (default: `SignerBackedMinter`).
+  `WFJB_MINTER={offline|signer|android}` env var picks the active minter;
+  `cli mint --via {auto|offline|signer|android}` is the manual knob.
+- **Open** — fully reverse the mgop `sign` implementation so a current
+  `ts/sign` can be generated offline without a fresh device capture (see
+  `police_report/docs/superpowers/specs/`).
 
 ## Target
 

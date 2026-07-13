@@ -61,9 +61,17 @@ class RefreshOutcome(Enum):
     GATEWAY_ERROR = "GATEWAY_ERROR"  # other MGOP gateway failure (e.g. rs=4001)
     BAD_TEMPLATE = "BAD_TEMPLATE"   # missing/poisoned/undecodable replay template
     NETWORK_ERROR = "NETWORK_ERROR"     # transport failure reaching the gateway
+    MINT_FAILED = "MINT_FAILED"     # configured TokenMinter could not produce a JWT
 
     # Backward-compat alias used by older docs/scripts.
     PORTAL_EXPIRED = "AUTH_EXPIRED"
+
+
+# Replay is dead but a live signer/capture minter may still recover.
+_MINTABLE = frozenset({
+    RefreshOutcome.SIGNATURE_EXPIRED,
+    RefreshOutcome.BAD_TEMPLATE,
+})
 
 
 @dataclass
@@ -92,7 +100,8 @@ class TokenProvider:
                  margin_s: int = DEFAULT_MARGIN_S,
                  poster: Callable[..., object] = requests.post,
                  clock: Callable[[], float] = time.time,
-                 rng: Callable[[], float] = random.random):
+                 rng: Callable[[], float] = random.random,
+                 minter: Optional[Callable[[], str]] = None):
         self.token_path = token_path
         self.env_path = env_path
         self.replay_path = replay_path
@@ -102,6 +111,8 @@ class TokenProvider:
         self.poster = poster
         self.clock = clock
         self.rng = rng
+        # minter: zero-arg callable returning a fresh JWT (TokenMinter.mint).
+        self.minter = minter
 
     # ---- public API -------------------------------------------------------
 
@@ -158,12 +169,29 @@ class TokenProvider:
                 return blocked
 
         result = self._replay_and_classify()
+        if result.outcome in _MINTABLE and self.minter is not None:
+            result = self._mint_fallback(result)
         if result.outcome is RefreshOutcome.OK and result.token:
             # Credentials first — state is observational and must not block save.
             save_token(result.token, token_path=self.token_path,
                        env_path=self.env_path)
         self._write_state_best_effort(result)
         return result
+
+    def _mint_fallback(self, prior: RefreshResult) -> RefreshResult:
+        """Replace a dead replay with a live TokenMinter when configured."""
+        try:
+            token = self.minter()
+        except Exception as e:
+            return RefreshResult(
+                RefreshOutcome.MINT_FAILED, None,
+                f"{prior.outcome.value}: {prior.detail}; mint failed: {e}")
+        if not token:
+            return RefreshResult(
+                RefreshOutcome.MINT_FAILED, None,
+                f"{prior.outcome.value}: {prior.detail}; mint returned empty token")
+        return RefreshResult(RefreshOutcome.OK, token,
+                             f"minted via TokenMinter (after {prior.outcome.value})")
 
     def _backoff_block(self) -> Optional[RefreshResult]:
         state = self._read_state()
@@ -366,4 +394,12 @@ class TokenProvider:
 
 # Convenience default instance for callers that don't need injection.
 def default_provider() -> TokenProvider:
-    return TokenProvider()
+    minter_fn = None
+    try:
+        from .minter import default_minter
+        m = default_minter()
+        if m is not None:
+            minter_fn = m.mint
+    except Exception:
+        minter_fn = None
+    return TokenProvider(minter=minter_fn)

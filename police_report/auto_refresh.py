@@ -29,6 +29,7 @@ _UNRECOVERABLE = {
     RefreshOutcome.SIGNATURE_EXPIRED,
     RefreshOutcome.AUTH_EXPIRED,
     RefreshOutcome.BAD_TEMPLATE,
+    RefreshOutcome.MINT_FAILED,
 }
 
 

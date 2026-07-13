@@ -16,8 +16,7 @@ The `x-token` JWT that every wfjb call needs is minted by the app's mgop gateway
         user-agent:        000001@JCSS_android_3.14.26
         sid / sessionid:   <gsid>          # from the main-app portal login session
         ts:                <epoch_ms>
-        sign:              <md5>           # signed over the request — algo lives in
-                                           # the mgop native SDK, NOT yet reversed
+        sign:              <md5>           # GatewayUtil.md5Sign (offline; see signer.py)
         content-type:      application/json; charset=utf-8
     body: {"platformId": 8}
     -> {"code":200,"data":{"token":"<JWT>", "accountId":..., "isReal":"1", ...}}
@@ -25,7 +24,7 @@ The `x-token` JWT that every wfjb call needs is minted by the app's mgop gateway
 Two things block a from-scratch login and are NOT solved here:
   1. `sid`/`sessionid` (gsid) comes from the portal SSO login (phone/password or
      Alipay/gov SSO) in the main app — a separate flow.
-  2. `sign` is computed by the mgop native SDK; the algorithm is not reversed.
+  2. `sign` is GatewayUtil.md5Sign — implemented offline in `signer.OfflineMgopSigner`.
 
 So for now, obtain the token out-of-band (see get_token_from_mitm / README) and
 pass it to WfjbClient. mgop_auth() below is a faithful request builder for when
@@ -137,7 +136,7 @@ def mgop_auth(*, gsid: str, sign: str, ts: int,
         "content-type": "application/json; charset=utf-8",
         "accept-encoding": "gzip",
     }
-    resp = requests.post(MGOP_URL, headers=headers, data=json.dumps({"platformId": 8}),
+    resp = requests.post(MGOP_URL, headers=headers, data=b'{"platformId":8}',
                          timeout=30)
     body = resp.json()
     if body.get("code") != 200 or "token" not in body.get("data", {}):

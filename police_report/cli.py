@@ -131,6 +131,10 @@ def main(argv=None):
     rf = sub.add_parser("refresh")   # re-mint x-token via replay, no app needed
     rf.add_argument("--bypass-backoff", action="store_true",
                     help="ignore throttle next_retry_at cooldown")
+    mi = sub.add_parser("mint",
+                        help="mint x-token via TokenMinter (offline / signer / android)")
+    mi.add_argument("--via", choices=["offline", "signer", "android", "auto"], default="auto",
+                    help="offline|signer|android; auto uses WFJB_MINTER (default offline)")
     lg = sub.add_parser("login")        # portal SSO login -> persists session
     lg.add_argument("phone", nargs="?", help="defaults to WFJB_PHONE from .env")
     sr = sub.add_parser("save-replay")  # save the wfjb.auth replay template
@@ -177,6 +181,34 @@ def main(argv=None):
             else:
                 print(f"no wfjb.auth request found in {args.mitm_jsonl}")
             return
+        if args.cmd == "mint":
+            import os
+            import time
+            from .auth import save_token
+            from .minter import AndroidCaptureMinter, MintError, SignerBackedMinter
+            from .signer import default_bridge_signer, default_offline_signer
+
+            via = args.via
+            if via == "auto":
+                via = (os.environ.get("WFJB_MINTER") or "offline").strip().lower()
+            try:
+                if via in ("offline", "local", "python"):
+                    token = SignerBackedMinter(signer=default_offline_signer()).mint()
+                elif via in ("signer", "bridge"):
+                    token = SignerBackedMinter(signer=default_bridge_signer()).mint()
+                elif via in ("android", "emulator", "capture"):
+                    token = AndroidCaptureMinter().mint()
+                else:
+                    sys.exit(f"mint: unknown via={via!r}")
+            except MintError as e:
+                sys.exit(f"mint error: {e}")
+            save_token(token)
+            exp = decode_exp(token) or 0
+            print(f"minted x-token -> {TOKEN_PATH}")
+            print(f"  {token[:14]}...{token[-6:]} | exp {time.strftime('%H:%M:%S', time.localtime(exp))}"
+                  f" ({(exp - time.time())/60:.0f} min)")
+            return
+
         if args.cmd == "refresh":
             from .token_provider import RefreshOutcome, default_provider
             res = default_provider().refresh(

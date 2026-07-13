@@ -78,5 +78,9 @@ Captures (`/tmp/re/*.jsonl`) and `police_report/.token.json` / `.auth_replay.jso
 
 ## Open items
 
-- Reverse or host the mgop `sign` implementation so a current `ts/sign` can be generated without a fresh device capture. Portal SSO login is partly implemented, but a fresh gsid alone cannot rebuild the signed mint request.
+- Reverse or host the mgop `sign` implementation so a current `ts/sign` can be
+  generated without a fresh device capture. Scaffold is in
+  `police_report/signer.py` + `minter.py` (`WFJB_MINTER=signer|android`);
+  offline reverse is still open. Portal SSO login is partly implemented, but a
+  fresh gsid alone cannot rebuild the signed mint request without a signer.
 - `submit` files a **real** police report; client fails closed (`--confirm` required). Do not file false reports. (One real report filed this session: 回执 xlh 1493 / id 683341.)

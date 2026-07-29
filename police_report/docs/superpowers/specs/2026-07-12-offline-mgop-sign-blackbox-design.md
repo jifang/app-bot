@@ -1,75 +1,54 @@
 # Offline MGOP `sign` — black-box recovery
 
-**Status:** Phase 1 failed 2026-07-12 — escalate Phase 2  
+**Status:** ✅ Phase 1 succeeded 2026-07-12 (canon recovered, minter shipped)
 **Goal:** recover `sign = f(headers, body)` so mint needs no live mitm capture.
 
 ## Context
 
 `mgop.trustway.wfjb.auth` requires a portal `gsid` plus a native MGOP `sign`.
 Frozen `.auth_replay.json` dies with `rs=7003` when `ts` ages. End state is
-`OfflineMgopSigner` in Python (`WFJB_MINTER=offline`).
+`OfflineMgopSigner` in Python (default minter; opt out via `WFJB_MINTER=off`).
 
-## Phase 1 — black-box (this doc)
+## Canon
 
-### Inputs (candidates)
+`sign = md5( UTF-8( "{gatewaySignSecret}&api={api}&sid={gsid}&ts={ts}&data={base64(body)}" ) )`
 
-From captured `wfjb.auth` requests:
+recovered from `com.alibaba.gov.rpc.util.GatewayUtil.md5Sign` in the official
+APK (`com.hzpd.jwztc`). `gatewaySignSecret = "cgpQrzzC2VpmFCcIW0xa+2Oj"` is a
+build-time constant in `module_config.gateway.gatewaySignSecret`, not a
+per-user secret — it would only change on a new app release.
 
-| Field | Role |
-|---|---|
-| `api` | `mgop.trustway.wfjb.auth` |
-| `appid` | MGOP app id |
-| `sid` / `sessionid` | portal gsid |
-| `ts` | ms timestamp |
-| body | usually `{"platformId":8}` |
-| `extra-ak`, `ttid`, `user-agent` | optional canon fields |
+`appid` is a request header (`421424f5fe7b444782907d18955b8e1a`) but does
+**not** enter the canon.
 
-Observed `sign` is 32 lowercase hex → primary hypothesis **MD5**. Also try
-SHA-1 / SHA-256 truncated to 32 hex, and HMAC-MD5 with known/empty keys.
+## Implementation
 
-### Method
+* `police_report/signer.py:68` — `OfflineMgopSigner`
+* `police_report/minter.py:51` — `SignerBackedMinter` wires signer + gsid +
+  `mgop_auth` into a single mint
+* `police_report/token_provider.py:_refresh_unlocked` falls back to the minter
+  on `SIGNATURE_EXPIRED` / `BAD_TEMPLATE`; cached `.auth_replay.json` is now a
+  gsid source, not a sign source
+* `default_minter()` defaults to `OfflineMgopSigner`; no env var needed
 
-1. Collect ≥1 (prefer ≥2) auth samples from `.auth_replay.json` and mitm jsonl.
-2. Enumerate string canons: field permutations of the core set, separators
-   (`""`, `"&"`, `"="` kv, `,`), body as raw / UTF-8 / hex / `md5(body)`.
-3. Hash each candidate; exact-match captured `sign`.
-4. Confirm on a second independent capture before declaring success.
-5. On success: implement `OfflineMgopSigner` + wire minter; verify
-   `cli mint` → `rs=1000` JWT.
-6. On failure after a bounded search: stop Phase 1; escalate Phase 2 (Frida oracle).
+## Verification
 
-### Out of scope (Phase 1)
+* `tests/test_signer_minter.py:183` — `OfflineMgopSigner.sign()` reproduces a
+  captured 2026-07-12 replay `e81e0a306731622652a58cb66119b4b9` exactly
+* Live mint on 2026-07-13 against `mapi-jcss.police.hangzhou.gov.cn` returned
+  a `rs=1000` JWT with the canonical `sub=897780` and a fresh `ts`
 
-- Frida / LSPosed hooks
-- Static RE of `libalisecuritysdk.so`
-- Emulator signer bridge
+## Phase 2 — not needed
 
-### Success criteria
+Frida oracle / native RE was skipped because Phase 1 closed the loop. Keep the
+spec on file as the audit trail; do not start Phase 2 unless
+`gatewaySignSecret` changes in a new APK (signer unit test will catch it on the
+first replay replay).
 
-`sign(api, appid, gsid, ts, body)` reproduced offline for ≥2 captures, and a
-fresh-`ts` mint returns JWT (`rs=1000`).
+## Caveats
 
-### Failure criteria
-
-No exact match after the agreed search space → document attempts; start Phase 2
-design (Frida I/O dump → then RE / port).
-
-## Phase 1 results (2026-07-12)
-
-**Verdict: no match.**
-
-Tried against 3 captures (incl. `.auth_replay.json` with full body):
-
-- MD5 / SHA1-32 / SHA256-32 of value-joins, `key=value` joins, sorted query
-  strings, body raw/hex/md5, ± `extra-ak` / `ttid` / UA
-- HMAC-MD5 with empty / appid / sid / `extra-ak` fragments as keys
-- ~5e5+ candidates; **0 exact hits**
-
-Evidence sign is **not** plain MD5(canon of visible headers+body):
-
-- `libalisecuritysdk.so` present; dex heavily packed (shell) — no clear Java
-  `getSign` strings
-- H5 uses `ZWJSBridge` (native), no client-side MD5 of the mgop request
-
-**Next:** Phase 2 — Frida/LSPosed signing oracle on rooted device (hook native
-signer I/O), then port or keep bridge. Mitm capture remains fallback.
+* Portal **gsid** expires on its own clock. Until `portal_refresh.py` lands,
+  renew via `cli login` (SMS OTP) or in-app re-login.
+* Sign canon ties to a build of `com.hzpd.jwztc`. If the gateway secret rotates
+  in a future release, this signer will silently produce 7003 until updated;
+  alert on `auto_refresh` exit-1 in `.token_state.json` to catch it.

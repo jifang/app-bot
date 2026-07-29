@@ -1,22 +1,21 @@
-"""auto_refresh.py — cron entry point for lazy wfjb x-token refresh.
+"""auto_refresh.py — cron entry point for unattended wfjb x-token refresh.
 
-This is now a thin wrapper over TokenProvider (police_report/token_provider.py),
+This is a thin wrapper over TokenProvider (police_report/token_provider.py),
 which owns the single locked replay+classify+persist path. Behaviour:
 
-  * Lazy — TokenProvider checks the cached JWT before attempting the saved replay.
-    A frozen replay is only a short bootstrap aid: it cannot renew once its signed
-    timestamp ages out (rs=7003), so this job is also a health monitor rather than
-    a promise of unattended long-term refresh.
-  * Explicit classification — including SIGNATURE_EXPIRED (rs=7003) separately
-    from AUTH_EXPIRED and transient gateway/network failures.
+  * Lazy — TokenProvider checks the cached JWT before attempting anything.
+  * Minter fallback — when the replay returns SIGNATURE_EXPIRED / BAD_TEMPLATE,
+    the configured TokenMinter takes over. The default minter is
+    OfflineMgopSigner (pure-Python GatewayUtil.md5Sign), so once the gsid is
+    alive, this job keeps x-token warm indefinitely without any device.
 
 Exit code (what cron mails on):
   * OK, or a transient failure while the cached token
     is still valid                                                        -> 0
-  * unrecoverable (SIGNATURE_EXPIRED / AUTH_EXPIRED / BAD_TEMPLATE), or
-    nothing usable left                                                   -> 1
+  * unrecoverable (AUTH_EXPIRED, MINT_FAILED, nothing usable left)        -> 1
 
-When it exits non-zero the operator recovers with `cli login` + a fresh capture.
+When it exits non-zero the operator recovers with `cli login` to renew the
+gsid, then a fresh `save-replay` if needed.
 """
 from __future__ import annotations
 

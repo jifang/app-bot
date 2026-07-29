@@ -1,5 +1,12 @@
 结论：当前版本比上次健康很多，核心重构方向是对的，但仍有几个会直接造成“刷新看起来随机失败”的语义问题。尤其是当前实际状态已经进入：JWT 已过期、replay 返回 `THROTTLED`、且没有定时任务运行，因此现在无法自动获得可用 token。
 
+> **Snapshot note (2026-07-13):** all P1 items below are now addressed in code
+> (`TokenProvider` minter fallback, auth-failure-classified `WfjbError`,
+> throttle backoff, atomic token store, best-effort state write, strict-TTL
+> `get_token` for writes). The cron is installed (`*/15 * * * *`).
+> `WFJB_MINTER=offline` is the default minter. Remaining TODO is gsid
+> silent renewal — see `police_report/TODO.md`.
+
 ## 当前检查结果
 
 - 工作树干净，HEAD 为 `6a8d759`。

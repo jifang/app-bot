@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# install_cron.sh — install the token health-check / best-effort refresh job.
+# install_cron.sh — install the unattended token refresh job.
 #
-# Schedule: every 15 minutes. A frozen replay cannot renew after MGOP's signed
-# timestamp window (rs=7003), so this job primarily surfaces that recovery action;
-# it does not remove the need for a fresh signed capture. A `cron` MAILTO will
-# receive non-zero exits (signature expired, portal dead, or no usable token).
+# Schedule: every 15 minutes. The default minter (OfflineMgopSigner) keeps the
+# x-token warm indefinitely; the job only exits non-zero when the gsid itself
+# dies or the gateway is unreachable. A `cron` MAILTO will receive those
+# non-zero exits (the signal to re-login + re-capture).
 #
 # Re-run this script any time to reset the schedule.
 set -euo pipefail

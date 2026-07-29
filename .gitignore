@@ -41,6 +41,17 @@ screen*.png
 *.idsig
 *.jks
 
+# --- police_report local assets (large binaries / real data, kept off-repo) ---
+# Real dashcam footage of traffic violations (privacy + size); report.<plate>.json
+# is the only filed artifact that goes off-repo and is already covered above.
+police_report/camera/
+# Vendor APK + rootAVD (submodule-style, has its own .git) — pull fresh via
+# police_report/scripts/pull_install_apk.sh; only the script is checked in.
+police_report/vendor/
+# Stray debug screenshots from manual frida runs / extract_overlay testing
+mpv-shot*.jpg
+police_report/mpv-shot*.jpg
+
 # python
 __pycache__/
 *.pyc

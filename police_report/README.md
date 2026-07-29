@@ -53,54 +53,60 @@ POST https://mapi-jcss.police.hangzhou.gov.cn/app/mgop
   ->  {"code":200, "data":{"token":"<JWT>", "isReal":"1", …}}
 ```
 
-Two inputs to this call are **not reproducible offline**, which is why a
-from-scratch login isn't implemented:
-- **`gsid`** comes from the portal SSO login (a separate app flow).
-- **`sign`** is `GatewayUtil.md5Sign` (pure Python in `signer.OfflineMgopSigner`):
+One input to this call is **not reproducible offline**, which is why a
+from-scratch portal login isn't implemented:
+- **`gsid`** comes from the portal SSO login (a separate app flow), or is
+  pulled out of `.auth_replay.json`'s frozen `sid` header (the captured
+  portal session is still alive). No mitm capture needed to refresh
+  `x-token`.
+- **`sign`** is `GatewayUtil.md5Sign` (pure Python in `signer.OfflineMgopSigner`,
+  the default minter):
   `MD5("{secret}&api={api}&sid={gsid}&ts={ts}&data={base64(body)}")`.
-  Still need a live portal **`gsid`**; no mitm capture needed to refresh `x-token`.
+  Secret is the build-time constant `cgpQrzzC2VpmFCcIW0xa+2Oj` from
+  `module_config.gateway.gatewaySignSecret` (would only change on a new APK).
 
-### Replay refresh — short window, not indefinite
+### Replay vs minter — two ways to mint
 
-A captured `(gsid, sign, ts)` triple can mint an x-token only while MGOP still
-accepts that signed timestamp. Save it once as `.auth_replay.json`:
+`refresh` and `mint` use two different paths; both go through `TokenProvider`:
+
+1. **Replay** (`.auth_replay.json`) — re-POSTs a captured `(gsid, sign, ts)`
+   triple. MGOP rejects it once the signed timestamp ages out with an empty
+   HTTP 200 + `rs=7003` header. Today this path is essentially a way to
+   surface the diagnosis and keep `.auth_replay.json`'s frozen `sid` as a
+   gsid source for the minter — the minter does the actual mint.
+2. **Minter** (`OfflineMgopSigner` by default) — pure-Python `GatewayUtil.md5Sign`
+   + fresh `ts` + gsid from `.auth_replay.json`'s `sid` (or `.session.json`).
+   No mitm capture needed for routine refresh.
 
 ```bash
-# auth-only capture (recommended):
+# first time / after gsid expires — only this needs a live capture:
 MITM_AUTH_ONLY=1 mitmproxy -s mitm_addon.py
 python -m police_report.cli save-replay /tmp/re/mitm.jsonl   # -> .auth_replay.json
-python -m police_report.cli refresh                          # re-mints, persists
+python -m police_report.cli refresh                          # mints + persists
 # when throttled cooldown blocks you and you know what you're doing:
 python -m police_report.cli refresh --bypass-backoff
 ```
+
+After that, the installed `*/15 * * * *` cron (`install_cron.sh`) keeps
+`x-token` warm indefinitely. The cron only fails (exit 1) if the **gsid**
+itself dies — `cli refresh` will then print `AUTH_EXPIRED` and
+`.token_state.json` will record `"outcome": "AUTH_EXPIRED"`. That's the signal
+to re-login + re-capture.
 
 ### token vs `gsid` — what refreshes, and what doesn't
 
 This is the distinction that matters when it breaks:
 
-| You have | Can refresh the **x-token**? | Can renew the **gsid**? |
+| You have | Can mint a fresh **x-token**? | Can renew the **gsid**? |
 |---|---|---|
-| `.auth_replay.json` (fresh signed timestamp) | ✅ yes — `cli refresh`, during the gateway's timestamp window | ❌ no — the gsid is frozen in it |
-| `.auth_replay.json` (stale `ts`/`sign`) | ❌ no — replay returns `SIGNATURE_EXPIRED` (`rs=7003`) | ❌ no |
-| `.auth_replay.json` (gsid expired) | ❌ no — replay returns `AUTH_EXPIRED` | ❌ no |
-| `cli login` (fresh gsid via phone+SMS) | ❌ no — can't rebuild the template | ✅ gets a gsid, but see below |
+| `.auth_replay.json` (live `sid`) + offline minter (default) | ✅ yes — `cli refresh` runs end-to-end | ❌ no |
+| `cli login` (fresh gsid via phone+SMS) | ✅ yes — write to `.session.json`, minter rebuilds sign | ✅ yes |
+| gsid expired (any path) | ❌ no — replay returns `AUTH_EXPIRED`; minter signs but MGOP rejects | ❌ no |
+| `.auth_replay.json` deleted, no `.session.json` | ❌ no — no gsid source at all | ❌ no |
 
-`.auth_replay.json` reuses one frozen `(gsid, sign, ts)` triple. It can mint an
-x-token only while MGOP accepts that signed timestamp. Once MGOP returns an empty
-HTTP 200 with response header `rs=7003` (验签时间戳校验失败), waiting and retrying the
-same template cannot help: capture a fresh `wfjb.auth`, run `save-replay`, then
-`refresh`. This does **not** prove that the gsid expired, and the portal
-`refreshToken` is not involved.
-
-If the `gsid` itself expires, a fresh portal login is also needed. `cli login` can
-obtain that gsid, but it **cannot** rebuild a working template by itself because a
-new matching `sign` is native-SDK-only.
-
-**When has the signature aged out?** `cli refresh` prints `SIGNATURE_EXPIRED` and
-the recovery is capture → `save-replay` → `refresh`. **When has the gsid died?**
-`cli refresh` prints `AUTH_EXPIRED`,
-`.token_state.json` records `"outcome": "AUTH_EXPIRED"`, and the cron exits
-non-zero. That's the signal to re-login + re-capture.
+`rs=7003` (验签时间戳校验失败) is a **replay-only** failure mode and no
+longer matters in the default flow — the offline minter computes a fresh
+`sign`+`ts` per request. Only `AUTH_EXPIRED` (`gsid` died) needs a human.
 
 ### How the client manages the token (`TokenProvider`)
 
@@ -137,27 +143,29 @@ Callers don't touch any of this — the CLI attaches a provider automatically. A
 
 ### Headless mint (no physical phone)
 
-Stale `.auth_replay.json` cannot be repaired by waiting (`rs=7003`). Configure a
-`TokenMinter` so `refresh` falls back after `SIGNATURE_EXPIRED` / `BAD_TEMPLATE`:
+The default minter is `OfflineMgopSigner` (pure Python). The cron job
+(`install_cron.sh`) refreshes `x-token` every 15 minutes unattended until the
+gsid itself expires.
 
 | `WFJB_MINTER` | Behavior |
 |---|---|
-| unset / `off` | replay only |
-| `offline` | `OfflineMgopSigner` (pure Python) + gsid → `mgop_auth` |
+| unset (default) | `OfflineMgopSigner` (pure Python) + gsid → `mgop_auth` |
+| `offline` | same as default |
 | `signer` | `BridgeMgopSigner` → `MGOP_SIGNER_URL` + `mgop_auth` |
 | `android` | boot AVD, mitm capture (legacy) |
+| `off` / `replay` | replay only — disable minter fallback |
 
 ```bash
-# headless mint (needs live portal gsid in .session.json or .auth_replay.json sid)
+# explicit mint (rarely needed; refresh auto-falls-back):
 WFJB_MINTER=offline python -m police_report.cli mint --via offline
 
-# or let refresh auto-fallback when replay signature expires
-export WFJB_MINTER=offline
+# let refresh do it (also exercised by the cron job):
 python -m police_report.cli refresh
 ```
 
 Interfaces: `police_report/signer.py` (`OfflineMgopSigner`), `police_report/minter.py`.
-Portal **gsid** still expires separately — renew via `cli login` / app login, then mint.
+Portal **gsid** still expires separately — when it does, run `cli login`
+(SMS OTP) to refresh `.session.json`.
 
 ### Bootstrapping the first token / re-capturing
 
@@ -188,27 +196,43 @@ Alternatives that skip the template (one-off use, token expires ~1 h):
 
 | file | holds | secret? |
 |---|---|---|
-| `.auth_replay.json` | the frozen `(gsid, sign, ts)` mint request | **yes** |
+| `.auth_replay.json` | frozen `(gsid, sign, ts)` mint request — replay also used as a gsid source for the minter | **yes** |
 | `.token.json` | sole token store: `x_token` + `cna` + `exp` | **yes** |
 | `.env` | reporter identity (`WFJB_PHONE`/`WFJB_NAME`); optional overrides | **yes** |
-| `.session.json` | portal login result from `cli login` (gsid/tokens) | **yes** |
+| `.session.json` | portal login result from `cli login` (gsid/tokens) — alternative gsid source | **yes** |
 | `.token_state.json` | last outcome, `next_retry_at`, counters (no secrets) | no |
 
-`.env` is auto-loaded by the CLI. Authoritative refresh material is
-`.auth_replay.json`; the live JWT lives only in `.token.json`.
+`.env` is auto-loaded by the CLI. The live JWT lives only in `.token.json`.
+The offline minter needs a gsid source — either `.auth_replay.json` (frozen
+`sid`) or `.session.json`; in both cases the minter rebuilds the sign from
+scratch.
 
 ## Auto-fill from dashcam video (OCR)
 
-DVR clips burn `YYYY年M月D日 HH:MM:SS` + full address into the bottom-left of
-every frame. `extract_overlay.py` OCRs that overlay (tesseract + chi_sim) and
-maps it straight onto `vioTime` / `currentAddress`.
+Dashcam clips burn a timestamp + sometimes an address into a corner of every
+frame, but the layout varies between vendors. `extract_overlay.py` tries each
+known layout (`PROFILES`) and picks the first whose timestamp regex matches
+the OCR'd crop:
+
+- **`bottom-70mai`** — bottom-left `YYYY年M月D日 HH:MM:SS` + Chinese address,
+  70迈-style DVR export (default `chi_sim` tesseract).
+- **`top-slash`** — top-left `YYYY/M/D HH:MM:SS` only, no burned-in
+  address — what Tesla-style and other modern cameras overlay (uses
+  `eng` tesseract since the overlay is pure ASCII digits/slashes/colons;
+  chi_sim mis-reads the slashes as Chinese radicals).
+
+Both are auto-detected by `--at` / `--scan` — no flag to choose. Output is
+straight onto `vioTime` / `currentAddress` in `report.json`, with the
+matched `layout` echoed back so you can sanity-check.
 
 ```bash
-brew install tesseract tesseract-lang     # ships the chi_sim model
+brew install tesseract tesseract-lang     # ships chi_sim + eng models
 pip install -r police_report/requirements.txt
 
 # single sample, 3.5s into the clip
 python -m police_report.extract_overlay clip.mov --at 3.5
+# {"vioTime": "2026-07-20 20:53:32", "currentAddress": null,
+#  "areaNameGuess": null, "layout": "top-slash"}
 
 # sample every 2s across the whole clip — use to find the violation moment
 python -m police_report.extract_overlay clip.mov --scan --interval 2
@@ -216,10 +240,14 @@ python -m police_report.extract_overlay clip.mov --scan --interval 2
 # merge straight into a report json (only vioTime/currentAddress/areaName touched)
 python -m police_report.extract_overlay clip.mov --at 3.5 \
     --fill report.example.json -o report.json
+# (top-slash prints a stderr warning reminding you to fill currentAddress by hand)
 ```
 
-`vioAddress` (the free-text "之江路南向近宋城" description) and `longitude`/
-`latitude` aren't in the overlay and still need filling by hand or a geocoder.
+`vioAddress` (the free-text "之江路南向近宋城" description), `currentAddress`
+on `top-slash` clips (no burned-in address), and `longitude`/`latitude` aren't
+in any overlay and still need filling by hand or a geocoder. Adding a new
+dashcam layout means adding an `OverlayProfile` to `PROFILES` in
+`extract_overlay.py` — see `tests/test_extract_overlay.py` for the contract.
 
 ## CLI
 
@@ -287,8 +315,12 @@ geocodes correctly. `report.example.json` also uses real-world `longitude`/
 ## Flow
 
 1. **Auth** — obtain `x-token` (see above).
-2. **Upload** — `upload_video()` → `POST /file/upload` (multipart field `file`) → file id.
-3. **Submit** — `submit_report()` → `POST /vio/report/submit` with `videoList:[id]`.
+2. **Upload** — `upload_video()` or `upload_pic()` → `POST /file/upload`
+   (multipart field `file`) → file id. Both kinds return a plain int id.
+3. **Submit** — `submit_report()` → `POST /vio/report/submit` with
+   `videoList:[id]` (and optional `picList:[id, ...]` for still photos of the
+   same violation). Both lists are sent together; coverage in
+   `tests/test_submit_mixed_media.py`.
 
 Static dicts (`violation_types()`, `areas()`) rarely change — cache them.
 Address string + coords come from 天地图 (`api.tianditu.gov.cn`); supply your own.
@@ -341,7 +373,7 @@ Some types are area-restricted (the dict `bz` field lists valid areaCodes; 高�
 | **x-token** | The ~1 h JWT (`exp` claim) every wfjb API call needs, sent as `X-Token: …`. Minted by the mgop `wfjb.auth` call; refreshed by replay. |
 | **cna** | Persistent device cookie (Umeng-style install id) required alongside the x-token. |
 | **sign** | `GatewayUtil.md5Sign`: `MD5(secret&api=&sid=&ts=&data=b64(body))`. Offline in `signer.py`. |
-| **ts** | Epoch-ms timestamp the `sign` is bound to. Once aged, the gateway rejects the replay with header `rs=7003` (验签时间戳校验失败) — recoverable only by a fresh mitm capture. |
+| **ts** | Epoch-ms timestamp the `sign` is bound to. The offline minter recomputes a fresh `(sign, ts)` per mint from the build-time `gatewaySignSecret`, so aging is a non-issue in the default flow. The replay path's frozen `ts` does age out with header `rs=7003`, but the minter takes over without needing a fresh capture. |
 | **rs** | Response-status code emitted by mgop in **response headers**, not the JSON body. `7003` = signed-timestamp expired, `4001` = gateway timeout. The body is often empty. |
 | **JWT** | JSON Web Token — the format of the x-token. |
 | **SSO** | Single sign-on — the portal login flow the gsid is bound to. |

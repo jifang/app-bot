@@ -237,16 +237,20 @@ class AndroidCaptureMinter:
 
 
 def default_minter() -> Optional[TokenMinter]:
-    """Pick a minter from env, or None if minting is not configured.
+    """Pick a minter from env, defaulting to headless offline.
 
-    WFJB_MINTER=offline → SignerBackedMinter + OfflineMgopSigner
-    WFJB_MINTER=signer  → SignerBackedMinter + BridgeMgopSigner
-    WFJB_MINTER=android → AndroidCaptureMinter
-    unset / off         → None (replay-only)
+    WFJB_MINTER unset     → SignerBackedMinter + OfflineMgopSigner (default)
+    WFJB_MINTER=offline   → SignerBackedMinter + OfflineMgopSigner
+    WFJB_MINTER=signer    → SignerBackedMinter + BridgeMgopSigner
+    WFJB_MINTER=android   → AndroidCaptureMinter
+    WFJB_MINTER=off|replay → None (replay-only — disabled fallback for parity)
     """
     mode = (os.environ.get("WFJB_MINTER") or "").strip().lower()
-    if mode in ("", "0", "off", "none", "replay"):
+    if mode in ("off", "none", "replay"):
         return None
+    if mode in ("", "offline", "local", "python"):
+        from .signer import default_offline_signer
+        return SignerBackedMinter(signer=default_offline_signer())
     if mode in ("offline", "local", "python"):
         from .signer import default_offline_signer
         return SignerBackedMinter(signer=default_offline_signer())

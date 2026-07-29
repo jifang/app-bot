@@ -1,7 +1,7 @@
 # Multi-layout dashcam overlay support
 
-**Status:** approved (design)
-**Date:** 2026-07-10
+**Status:** implemented 2026-07-21
+**Originally approved:** 2026-07-10
 **Scope:** `police_report/extract_overlay.py` only.
 
 ## Problem
@@ -187,8 +187,33 @@ Manual smoke tests on the user's machine (tesseract is non-deterministic across 
    - Expect `currentAddress` UNCHANGED (whatever was in `report.example.json`, since the new layout has no address).
    - Expect stderr warning as above.
 
+In addition, `tests/test_extract_overlay.py` (added at implementation time)
+pins the public contract with mocked tesseract/ffmpeg so the test suite
+doesn't depend on a real video file or chi_sim/eng models being installed.
+
+## Implementation deltas vs this spec
+
+- `OverlayProfile` gained two extra fields: `lang` (default `chi_sim`) and
+  `psm` (default `6`). The `top-slash` profile uses `lang="eng"` because its
+  overlay is pure ASCII digits/slashes/colons and chi_sim mis-recognises the
+  slashes as Chinese radicals. Spec didn't anticipate this, but it's a
+  straight extension of the same idea (per-profile OCR config).
+- `extract_overlay` now caches per-call frames at
+  `$TMPDIR/police_report_overlay_cache/` rather than
+  `tempfile.TemporaryDirectory()`. The temp-dir finalizer's race with
+  repeated `subprocess.run`+`Image.open` pairs in tight `scan()` loops
+  occasionally left the just-written PNG missing on macOS. The persistent
+  cache is small (one PNG per scan sample) and tesseract's lazy
+  file-decoder reads are no longer at risk.
+- `_grab_frame` now raises `_FrameGrabError` when ffmpeg exits 0 with no
+  output (which happens when `-ss` lands at or past EOF). Without this
+  guard, `Image.open(frame_path)` raised `FileNotFoundError` at the end
+  of every clip during `scan` calls. `extract_overlay` catches the
+  exception and returns an empty Overlay.
+
 ## Risks
 
-- **OCR miss on the new format.** Tesseract on the top 10% crop with 2× upscale may underperform if the text is anti-aliased gray-on-gray in the sample. Mitigations already in the design: 2× upscale (matches existing); `--psm 6` (uniform block of text). If accuracy is poor, future iteration can bump to 3× or preprocess (binarize / invert).
+- **OCR miss on the new format.** Tesseract on the top 10% crop with 2× upscale may underperform if the text is anti-aliased gray-on-gray in the sample. Mitigations already in the design: 2× upscale (matches existing); `--psm 6` (uniform block of text); `lang="eng"` for top-slash (added at impl time). If accuracy is still poor, future iteration can bump to 3× or preprocess (binarize / invert).
 - **Crop box miscalibrated.** If a different dashcam uses a smaller/larger top-left timestamp, the crop will still likely catch it (40% wide × 10% tall is generous) but tesseract may pick up noise. Acceptable for v1; a future dashcam variant gets its own profile.
 - **`/tmp/re/` from a previous session still on disk.** Unrelated to this change — pre-existing artefact.
+- **Per-call frame cache grows.** `$TMPDIR/police_report_overlay_cache/` holds one PNG per scan sample until OS tmpdir cleanup. For `extract_overlay --scan` on a long clip the directory can briefly hold ~20 PNGs (~120 MB). Acceptable; not currently auto-cleaned.

@@ -2,7 +2,7 @@
 
 **Status:** implemented 2026-07-21
 **Originally approved:** 2026-07-10
-**Scope:** `police_report/extract_overlay.py` only.
+**Scope:** `police_report/scripts/extract_overlay.py` only.
 
 ## Problem
 
@@ -155,7 +155,7 @@ This is always printed to stderr; it's rare enough that the noise cost is neglig
 
 ## File-level changes
 
-Single file: `police_report/extract_overlay.py`.
+Single file: `police_report/scripts/extract_overlay.py`.
 
 - Add `OverlayProfile` dataclass.
 - Add `PROFILES` list.
@@ -171,18 +171,18 @@ No other file in the repo needs to change.
 
 Manual smoke tests on the user's machine (tesseract is non-deterministic across builds; we pin values only loosely):
 
-1. `python -m police_report.extract_overlay /Users/jifang/Downloads/豫CF79001.mp4 --at 3.0`
+1. `python -m police_report.scripts.extract_overlay /Users/jifang/Downloads/豫CF79001.mp4 --at 3.0`
    - Expect `vioTime` starting with `2026-07-08 08:33:4` (or `08:33:5` — within ±2s).
    - Expect `currentAddress: null`, `areaNameGuess: null`.
    - Expect `detected layout: top-slash` on stdout.
    - Expect the stderr warning only when `--fill` is also passed.
 
-2. `python -m police_report.extract_overlay <some 70mai DVR clip> --at 1.0`
+2. `python -m police_report.scripts.extract_overlay <some 70mai DVR clip> --at 1.0`
    - Expect `vioTime` matching `YYYY-MM-DD HH:MM:SS`.
    - Expect `currentAddress` populated with a Chinese address starting with `浙江省` (or the local province).
    - Expect `detected layout: bottom-70mai`.
 
-3. `python -m police_report.extract_overlay /Users/jifang/Downloads/豫CF79001.mp4 --at 3.0 --fill report.example.json -o /tmp/out.json`
+3. `python -m police_report.scripts.extract_overlay /Users/jifang/Downloads/豫CF79001.mp4 --at 3.0 --fill report.example.json -o /tmp/out.json`
    - Expect `vioTime` populated in `/tmp/out.json`.
    - Expect `currentAddress` UNCHANGED (whatever was in `report.example.json`, since the new layout has no address).
    - Expect stderr warning as above.

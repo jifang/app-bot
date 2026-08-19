@@ -17,10 +17,10 @@ Requires:
   pip install pytesseract pillow
 
 Examples:
-  python -m police_report.extract_overlay DVR_2026-07-08_08-20-42_Front.mov
-  python -m police_report.extract_overlay clip.mov --at 6.5
-  python -m police_report.extract_overlay clip.mov --scan --interval 2
-  python -m police_report.extract_overlay clip.mov --at 6.5 \
+  python -m police_report.scripts.extract_overlay DVR_2026-07-08_08-20-42_Front.mov
+  python -m police_report.scripts.extract_overlay clip.mov --at 6.5
+  python -m police_report.scripts.extract_overlay clip.mov --scan --interval 2
+  python -m police_report.scripts.extract_overlay clip.mov --at 6.5 \
       --fill report.example.json -o report.json
 """
 from __future__ import annotations

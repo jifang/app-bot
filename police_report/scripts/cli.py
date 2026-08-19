@@ -4,13 +4,13 @@ CLI for the wfjb 违法举报 client.
 Token: pass --x-token / --cna, or set WFJB_X_TOKEN / WFJB_CNA, or --from-mitm <jsonl>.
 
 Examples:
-  python -m police_report.cli whoami
-  python -m police_report.cli dict wflx
-  python -m police_report.cli dict areas
-  python -m police_report.cli history
-  python -m police_report.cli upload path/to/clip.mp4
-  python -m police_report.cli submit report.json --dry-run
-  python -m police_report.cli submit report.json --confirm     # files a REAL report
+  python -m police_report.scripts.cli whoami
+  python -m police_report.scripts.cli dict wflx
+  python -m police_report.scripts.cli dict areas
+  python -m police_report.scripts.cli history
+  python -m police_report.scripts.cli upload path/to/clip.mp4
+  python -m police_report.scripts.cli submit report.json --dry-run
+  python -m police_report.scripts.cli submit report.json --confirm     # files a REAL report
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import sys
 
 import requests
 
-from .auth import (
+from ..auth import (
     ENV_PATH,
     REPLAY_PATH,
     TOKEN_PATH,
@@ -29,8 +29,8 @@ from .auth import (
     get_token_from_mitm,
     save_replay_template,
 )
-from .client import ViolationReport, WfjbClient, WfjbError
-from .resolve import ResolveError, resolve_report
+from ..client import ViolationReport, WfjbClient, WfjbError
+from ..resolve import ResolveError, resolve_report
 
 
 def _load_env(path: str = ENV_PATH) -> None:
@@ -72,7 +72,7 @@ def _make_client(args) -> WfjbClient:
 
     # Stored-token path: let the provider mint a fresh token if the cached one is
     # stale (needs a replay template); fall back to whatever the two stores hold.
-    from .token_provider import TokenUnavailable, default_provider
+    from ..token_provider import TokenUnavailable, default_provider
     provider = default_provider()
     tf = _load_token_file()
     try:
@@ -152,7 +152,7 @@ def main(argv=None):
 
     try:
         if args.cmd == "login":
-            from .portal_login import SESSION_PATH, PortalLoginFlow, save_session
+            from ..portal_login import SESSION_PATH, PortalLoginFlow, save_session
             phone = args.phone or os.environ.get("WFJB_PHONE")
             if not phone:
                 sys.exit("login: pass a phone number or set WFJB_PHONE in .env")
@@ -184,9 +184,9 @@ def main(argv=None):
         if args.cmd == "mint":
             import os
             import time
-            from .auth import save_token
-            from .minter import AndroidCaptureMinter, MintError, SignerBackedMinter
-            from .signer import default_bridge_signer, default_offline_signer
+            from ..auth import save_token
+            from ..minter import AndroidCaptureMinter, MintError, SignerBackedMinter
+            from ..signer import default_bridge_signer, default_offline_signer
 
             via = args.via
             if via == "auto":
@@ -210,7 +210,7 @@ def main(argv=None):
             return
 
         if args.cmd == "refresh":
-            from .token_provider import RefreshOutcome, default_provider
+            from ..token_provider import RefreshOutcome, default_provider
             res = default_provider().refresh(
                 force=True, bypass_backoff=args.bypass_backoff)
             if res.outcome is not RefreshOutcome.OK or not res.token:

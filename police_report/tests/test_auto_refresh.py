@@ -6,7 +6,7 @@ Contract (exit code drives cron mail):
 """
 from __future__ import annotations
 
-from police_report import auto_refresh
+from police_report.scripts import auto_refresh
 from police_report.token_provider import RefreshOutcome, RefreshResult
 
 

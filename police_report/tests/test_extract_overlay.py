@@ -1,4 +1,4 @@
-"""Unit tests for `police_report.extract_overlay` multi-layout support.
+"""Unit tests for `police_report.scripts.extract_overlay` multi-layout support.
 
 The spec lives at
 `docs/superpowers/specs/2026-07-10-multi-layout-overlay-design.md`. These
@@ -25,7 +25,7 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from police_report.extract_overlay import (
+from police_report.scripts.extract_overlay import (
     Overlay,
     OverlayProfile,
     PROFILES,
@@ -166,8 +166,8 @@ def test_extract_overlay_no_match_returns_empty_overlay():
     def fake_grab(video, offset_s, out_path):
         Image.new("RGB", (1000, 500), "white").save(out_path)
 
-    with patch("police_report.extract_overlay._grab_frame", side_effect=fake_grab), \
-         patch("police_report.extract_overlay.pytesseract.image_to_string",
+    with patch("police_report.scripts.extract_overlay._grab_frame", side_effect=fake_grab), \
+         patch("police_report.scripts.extract_overlay.pytesseract.image_to_string",
                return_value="some noisy OCR with no date anywhere\n"):
         ov = extract_overlay("whatever.mp4", 2.5)
 
@@ -192,8 +192,8 @@ def test_extract_overlay_top_slash_match_sets_layout_and_vio_time():
         fake_ocr_calls.append(kw.get("config"))
         return ocr_results[len(fake_ocr_calls) - 1]
 
-    with patch("police_report.extract_overlay._grab_frame", side_effect=fake_grab), \
-         patch("police_report.extract_overlay.pytesseract.image_to_string",
+    with patch("police_report.scripts.extract_overlay._grab_frame", side_effect=fake_grab), \
+         patch("police_report.scripts.extract_overlay.pytesseract.image_to_string",
                side_effect=fake_ocr):
         ov = extract_overlay("whatever.mp4", 1.0)
 
@@ -215,8 +215,8 @@ def test_extract_overlay_first_profile_wins_on_dual_match(capsys):
         # Both profiles' time_re regex search returns truthy.
         return "2026年7月20日 20:53:32 2026/07/20 20:53:32\n"
 
-    with patch("police_report.extract_overlay._grab_frame", side_effect=fake_grab), \
-         patch("police_report.extract_overlay.pytesseract.image_to_string",
+    with patch("police_report.scripts.extract_overlay._grab_frame", side_effect=fake_grab), \
+         patch("police_report.scripts.extract_overlay.pytesseract.image_to_string",
                side_effect=fake_ocr):
         ov = extract_overlay("whatever.mp4", 1.0)
 
@@ -244,9 +244,9 @@ def test_scan_uses_extract_overlay_per_sample(monkeypatch):
         calls.append(t)
         return Overlay(t, None, None, None, "")
 
-    monkeypatch.setattr("police_report.extract_overlay._probe_duration", lambda v: 5.0)
+    monkeypatch.setattr("police_report.scripts.extract_overlay._probe_duration", lambda v: 5.0)
     monkeypatch.setattr(
-        "police_report.extract_overlay.extract_overlay", fake_extract)
+        "police_report.scripts.extract_overlay.extract_overlay", fake_extract)
 
     results = scan("whatever.mp4", interval=2.0)
 
@@ -259,9 +259,9 @@ def test_scan_uses_extract_overlay_per_sample(monkeypatch):
 # Edge case: empty PROFILES list (defensive — not normal config)
 # ----------------------------------------------------------------------------
 def test_extract_overlay_handles_no_profiles_gracefully(monkeypatch):
-    monkeypatch.setattr("police_report.extract_overlay.PROFILES", [])
+    monkeypatch.setattr("police_report.scripts.extract_overlay.PROFILES", [])
     monkeypatch.setattr(
-        "police_report.extract_overlay._grab_frame",
+        "police_report.scripts.extract_overlay._grab_frame",
         lambda v, t, p: Image.new("RGB", (100, 50), "white").save(p) or None)
     ov = extract_overlay("whatever.mp4", 0.0)
     assert ov.offset_s == 0.0

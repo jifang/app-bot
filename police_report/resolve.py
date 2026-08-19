@@ -26,7 +26,7 @@ def _load_dicts(path: str = DICTS_PATH) -> dict:
     if not os.path.isfile(path):
         raise ResolveError(
             f"dict cache missing: {path}. Refresh it with "
-            f"`python -m police_report.cli dict wflx` / `dict areas` (needs a token)."
+            f"`python -m police_report.scripts.cli dict wflx` / `dict areas` (needs a token)."
         )
     return json.load(open(path, encoding="utf-8"))
 

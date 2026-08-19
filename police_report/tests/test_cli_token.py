@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 
-from police_report import cli
+from police_report.scripts import cli
 
 
 def _jwt(exp: int) -> str:

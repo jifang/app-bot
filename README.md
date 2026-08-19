@@ -42,14 +42,16 @@ app-bot/
 │
 └── police_report/                      # 警察叔叔 traffic-violation report automation
     ├── README.md                       #   full usage guide (auth, submit, OCR, …)
-    ├── cli.py                          #   `cli refresh|mint|login|submit|upload|...`
     ├── auth.py / client.py / token_provider.py
     ├── minter.py / signer.py / portal_login.py
-    ├── extract_overlay.py              #   dashcam-overlay OCR (timestamp/plate/address)
     ├── resolve.py                      #   human name → wfjb code (backed by dicts.json)
     ├── report.example.json             #   filing template (real reports are gitignored)
     ├── docs/superpowers/               #   design specs (mgop reverse, overlay OCR, …)
-    ├── scripts/                        #   adb / avdmanager helpers
+    ├── scripts/                        #   CLI entry points + adb / avdmanager helpers
+    │   ├── cli.py                      #     `cli refresh|mint|login|submit|upload|...`
+    │   ├── auto_refresh.py             #     cron entry point for unattended token refresh
+    │   ├── extract_overlay.py          #     dashcam-overlay OCR (timestamp/plate/address)
+    │   └── install_cron.sh / *.sh      #     cron installer + adb/avd helpers
     ├── tests/                          #   pytest suite
     ├── camera/                         #   🚫 real dashcam footage — gitignored
     ├── vendor/                         #   🚫 APK + rootAVD — gitignored, re-pull via scripts/
@@ -102,7 +104,7 @@ Files:
 
 ## Police-app quick start
 
-See `police_report/README.md`. The `cli.py` accepts:
+See `police_report/README.md`. The CLI (`police_report/scripts/cli.py`) accepts:
 - `refresh` — replay-based, current production path
 - `mint --via {auto|offline|signer|android}` — alternative minter path
 - `login`, `whoami`, `submit`, `upload`, `dict`, `history`, `save-replay`

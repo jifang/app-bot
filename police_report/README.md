@@ -81,10 +81,10 @@ from-scratch portal login isn't implemented:
 ```bash
 # first time / after gsid expires — only this needs a live capture:
 MITM_AUTH_ONLY=1 mitmproxy -s mitm_addon.py
-python -m police_report.cli save-replay /tmp/re/mitm.jsonl   # -> .auth_replay.json
-python -m police_report.cli refresh                          # mints + persists
+python -m police_report.scripts.cli save-replay /tmp/re/mitm.jsonl   # -> .auth_replay.json
+python -m police_report.scripts.cli refresh                          # mints + persists
 # when throttled cooldown blocks you and you know what you're doing:
-python -m police_report.cli refresh --bypass-backoff
+python -m police_report.scripts.cli refresh --bypass-backoff
 ```
 
 After that, the installed `*/15 * * * *` cron (`install_cron.sh`) keeps
@@ -157,10 +157,10 @@ gsid itself expires.
 
 ```bash
 # explicit mint (rarely needed; refresh auto-falls-back):
-WFJB_MINTER=offline python -m police_report.cli mint --via offline
+WFJB_MINTER=offline python -m police_report.scripts.cli mint --via offline
 
 # let refresh do it (also exercised by the cron job):
-python -m police_report.cli refresh
+python -m police_report.scripts.cli refresh
 ```
 
 Interfaces: `police_report/signer.py` (`OfflineMgopSigner`), `police_report/minter.py`.
@@ -175,9 +175,9 @@ in [`../FINDINGS-jwztc.md`](../FINDINGS-jwztc.md) §3. Once you have a capture:
 
 ```bash
 MITM_AUTH_ONLY=1 mitmproxy -s mitm_addon.py   # disk: wfjb.auth only, mode 0600
-python -m police_report.cli save-replay /tmp/re/mitm.jsonl
-python -m police_report.cli refresh
-python -m police_report.cli whoami
+python -m police_report.scripts.cli save-replay /tmp/re/mitm.jsonl
+python -m police_report.scripts.cli refresh
+python -m police_report.scripts.cli whoami
 # then delete the raw capture
 ```
 
@@ -230,15 +230,15 @@ brew install tesseract tesseract-lang     # ships chi_sim + eng models
 pip install -r police_report/requirements.txt
 
 # single sample, 3.5s into the clip
-python -m police_report.extract_overlay clip.mov --at 3.5
+python -m police_report.scripts.extract_overlay clip.mov --at 3.5
 # {"vioTime": "2026-07-20 20:53:32", "currentAddress": null,
 #  "areaNameGuess": null, "layout": "top-slash"}
 
 # sample every 2s across the whole clip — use to find the violation moment
-python -m police_report.extract_overlay clip.mov --scan --interval 2
+python -m police_report.scripts.extract_overlay clip.mov --scan --interval 2
 
 # merge straight into a report json (only vioTime/currentAddress/areaName touched)
-python -m police_report.extract_overlay clip.mov --at 3.5 \
+python -m police_report.scripts.extract_overlay clip.mov --at 3.5 \
     --fill report.example.json -o report.json
 # (top-slash prints a stderr warning reminding you to fill currentAddress by hand)
 ```
@@ -252,15 +252,15 @@ dashcam layout means adding an `OverlayProfile` to `PROFILES` in
 ## CLI
 
 ```bash
-python -m police_report.cli login                  # portal SSO login, saves session
-python -m police_report.cli refresh                # re-mint x-token via replay
-python -m police_report.cli whoami                 # account info
-python -m police_report.cli dict wflx              # 19 violation-type codes
-python -m police_report.cli dict areas             # district (areaCode) tree
-python -m police_report.cli history                # your past reports
-python -m police_report.cli upload clip.mp4        # -> file id
-python -m police_report.cli submit report.json --dry-run    # print payload only
-python -m police_report.cli submit report.json --confirm    # REAL submit
+python -m police_report.scripts.cli login                  # portal SSO login, saves session
+python -m police_report.scripts.cli refresh                # re-mint x-token via replay
+python -m police_report.scripts.cli whoami                 # account info
+python -m police_report.scripts.cli dict wflx              # 19 violation-type codes
+python -m police_report.scripts.cli dict areas             # district (areaCode) tree
+python -m police_report.scripts.cli history                # your past reports
+python -m police_report.scripts.cli upload clip.mp4        # -> file id
+python -m police_report.scripts.cli submit report.json --dry-run    # print payload only
+python -m police_report.scripts.cli submit report.json --confirm    # REAL submit
 ```
 
 ## Library

@@ -18,7 +18,7 @@
 | `police_report/minter.py` | `TokenMinter` + `SignerBackedMinter` + `AndroidCaptureMinter` |
 | `police_report/scripts/setup_wfjb_avd.sh` | Create ARM64 API 34 AVD |
 | `police_report/token_provider.py` | Hook minter on signature expiry |
-| `police_report/cli.py` | `mint` subcommand |
+| `police_report/scripts/cli.py` | `mint` subcommand |
 | `police_report/tests/test_signer_minter.py` | Unit tests |
 | `police_report/docs/superpowers/specs/2026-07-11-headless-mgop-mint.md` | Spec snapshot |
 

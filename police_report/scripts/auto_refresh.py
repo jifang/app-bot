@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sys
 
-from .token_provider import RefreshOutcome, default_provider
+from ..token_provider import RefreshOutcome, default_provider
 
 # Non-OK outcomes that never resolve on their own — always surface to the operator.
 _UNRECOVERABLE = {

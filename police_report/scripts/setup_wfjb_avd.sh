@@ -33,9 +33,9 @@ echo "  2. Log in once on the AVD (scrcpy / Android Studio Embedded; SMS / gov S
 echo "  3. Terminal A: MITM_AUTH_ONLY=1 MITM_OUT=/tmp/re/mint.jsonl mitmdump -s mitm_addon.py -p 8080"
 echo "     Point the emulator HTTP proxy at the host (Settings → Proxy, or:"
 echo "       adb -e shell settings put global http_proxy <host-ip>:8080)"
-echo "  4. Terminal B: WFJB_MINTER=android python -m police_report.cli mint --via android"
+echo "  4. Terminal B: WFJB_MINTER=android python -m police_report.scripts.cli mint --via android"
 echo
 echo "Bridge signer (LSPosed/helper) instead of capture:"
 echo "  export MGOP_SIGNER_URL=http://127.0.0.1:8765"
 echo "  export WFJB_MINTER=signer"
-echo "  python -m police_report.cli mint --via signer"
+echo "  python -m police_report.scripts.cli mint --via signer"

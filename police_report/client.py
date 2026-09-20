@@ -136,10 +136,22 @@ class WfjbClient:
             self._set_token(res.token)
             return self._unwrap(self.s.get(self.base + path, timeout=self.timeout, **kw))
 
-    def _post(self, path: str, **kw) -> dict:
-        # No automatic retry here: _post backs submit_report, where a blind retry
-        # after an ambiguous response could file a duplicate real report.
-        return self._unwrap(self.s.post(self.base + path, timeout=self.timeout, **kw))
+    def _post(self, path: str, *, retry_auth: bool = False, **kw) -> dict:
+        # By default no automatic retry: _post backs submit_report, where a blind
+        # retry after an ambiguous response could file a duplicate real report.
+        # Uploads set retry_auth=True: they are idempotent enough that a single
+        # refresh-and-retry on a 401/403 is safe (the server either stored the
+        # file or didn't; a duplicate upload just returns a different id).
+        try:
+            return self._unwrap(self.s.post(self.base + path, timeout=self.timeout, **kw))
+        except WfjbError as e:
+            if not retry_auth or not self.provider or not e.auth_failure:
+                raise
+            res = self.provider.refresh(force=True)
+            if not res.token:
+                raise
+            self._set_token(res.token)
+            return self._unwrap(self.s.post(self.base + path, timeout=self.timeout, **kw))
 
     @staticmethod
     def _unwrap(resp: requests.Response) -> dict:
@@ -195,7 +207,7 @@ class WfjbClient:
         self._refresh_before()      # a stale token here just wastes an upload; refresh first
         with open(path, "rb") as fh:
             files = {"file": (fname, fh, ct)}
-            body = self._post("/file/upload", files=files)
+            body = self._post("/file/upload", files=files, retry_auth=True)
         return body["data"]["id"]
 
     # ---- submit (files a REAL police report) ----

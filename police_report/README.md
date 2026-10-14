@@ -2,7 +2,7 @@
 
 Python client for the Hangzhou police **违法举报 (wfjb)** backend, reverse-engineered
 from the `com.hzpd.jwztc` (警察叔叔) app. For how the traffic was captured (anti-root,
-anti-frida, MITM), see [`../FINDINGS-jwztc.md`](../FINDINGS-jwztc.md).
+anti-frida, MITM), see [`../docs/FINDINGS-jwztc.md`](../docs/FINDINGS-jwztc.md).
 
 Backend: `https://wfjb.police.hangzhou.gov.cn:7443/wfjb-front-api/`
 Auth: an `x-token` JWT on every request (+ a `cna` cookie).
@@ -80,7 +80,7 @@ from-scratch portal login isn't implemented:
 
 ```bash
 # first time / after gsid expires — only this needs a live capture:
-MITM_AUTH_ONLY=1 mitmproxy -s mitm_addon.py
+MITM_AUTH_ONLY=1 mitmproxy -s re/mitm_addon.py
 python -m police_report.scripts.cli save-replay /tmp/re/mitm.jsonl   # -> .auth_replay.json
 python -m police_report.scripts.cli refresh                          # mints + persists
 # when throttled cooldown blocks you and you know what you're doing:
@@ -171,10 +171,10 @@ Portal **gsid** still expires separately — when it does, run `cli login`
 
 The device-side capture (Magisk DenyList, mitmproxy CA as a system cert, the app
 proxied with **China-direct routing**, then open the wfjb H5 once) is documented
-in [`../FINDINGS-jwztc.md`](../FINDINGS-jwztc.md) §3. Once you have a capture:
+in [`../docs/FINDINGS-jwztc.md`](../docs/FINDINGS-jwztc.md) §3. Once you have a capture:
 
 ```bash
-MITM_AUTH_ONLY=1 mitmproxy -s mitm_addon.py   # disk: wfjb.auth only, mode 0600
+MITM_AUTH_ONLY=1 mitmproxy -s re/mitm_addon.py   # disk: wfjb.auth only, mode 0600
 python -m police_report.scripts.cli save-replay /tmp/re/mitm.jsonl
 python -m police_report.scripts.cli refresh
 python -m police_report.scripts.cli whoami
@@ -239,7 +239,7 @@ python -m police_report.scripts.extract_overlay clip.mov --scan --interval 2
 
 # merge straight into a report json (only vioTime/currentAddress/areaName touched)
 python -m police_report.scripts.extract_overlay clip.mov --at 3.5 \
-    --fill report.example.json -o report.json
+    --fill police_report/reports/report.example.json -o report.json
 # (top-slash prints a stderr warning reminding you to fill currentAddress by hand)
 ```
 

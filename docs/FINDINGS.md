@@ -1,7 +1,7 @@
 # 高德地图 API RE — Findings
 
 Chronological RE log. Sections are time-ordered. Status-as-of-now is in
-[`README.md`](./README.md) and pending work is in [`TODO.md`](./TODO.md).
+[`README.md`](../README.md) and pending work is in [`TODO.md`](./TODO.md).
 
 ## Status (2026-07-12)
 
@@ -16,7 +16,7 @@ Chronological RE log. Sections are time-ordered. Status-as-of-now is in
   `ModuleRequest.fetch`; reaches the same `code 14` because the live session is
   now stale.
 
-File map (full list in [`README.md`](./README.md)):
+File map (full list in [`README.md`](../README.md)):
 
 | Path | Role |
 |------|------|

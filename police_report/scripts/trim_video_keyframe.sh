@@ -3,19 +3,27 @@
 # on the closest keyframe at or before START, then stream-copying up to
 # END. Output strips audio and avoids re-encoding.
 #
+# With -a/--accurate the cut starts exactly at START instead: the video is
+# re-encoded with x265 (CRF 24) so no keyframe alignment is needed.
+#
 # START and END accept seconds (12.5), MM:SS (1:23), or HH:MM:SS (1:02:03).
 #
 # Examples:
 #   trim_video_keyframe.sh clip.mp4 00:01:23 00:02:45 out.mp4
 #   trim_video_keyframe.sh clip.mp4 12.5 45 out.mp4
+#   trim_video_keyframe.sh --accurate clip.mp4 00:01:23.4 00:02:45 out.mp4
 set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $(basename "$0") INPUT START END OUTPUT
+Usage: $(basename "$0") [-a|--accurate] INPUT START END OUTPUT
 
   Trim INPUT to [START, END], cutting on the nearest keyframe at or before
   START and copying up to END. Audio is dropped; the video is not re-encoded.
+
+Options:
+  -a, --accurate  start exactly at START: re-encode video with x265, CRF 24
+                  (slower; needed because stream copy can only cut on keyframes)
 
 Arguments:
   INPUT   path to source video
@@ -26,6 +34,7 @@ Arguments:
 Examples:
   $(basename "$0") clip.mp4 00:01:23 00:02:45 out.mp4
   $(basename "$0") clip.mp4 12.5        45      out.mp4
+  $(basename "$0") --accurate clip.mp4 12.5 45 out.mp4
 EOF
   exit 2
 }
@@ -67,6 +76,17 @@ to_seconds() {
   }'
 }
 
+accurate=0
+args=()
+for arg in "$@"; do
+  case $arg in
+    -a|--accurate) accurate=1 ;;
+    -h|--help) usage ;;
+    *) args+=("$arg") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
 [[ $# -eq 4 ]] || usage
 
 input=$1
@@ -85,6 +105,21 @@ awk -v start="$start" -v end="$end" 'BEGIN { exit !(end > start) }' || {
   printf 'END must be later than START.\n' >&2
   exit 1
 }
+
+if (( accurate )); then
+  duration=$(awk -v start="$start" -v end="$end" 'BEGIN { printf "%.9f", end - start }')
+  printf 'Accurate mode: re-encoding with x265 CRF 24 from %s seconds\n' "$start"
+  ffmpeg -hide_banner -y \
+    -ss "$start" \
+    -i "$input" \
+    -t "$duration" \
+    -map 0:v:0 \
+    -c:v libx265 -crf 24 -preset medium -tag:v hvc1 \
+    -an \
+    -avoid_negative_ts make_zero \
+    "$output"
+  exit 0
+fi
 
 keyframe=$(
   ffprobe -v error \

@@ -3,9 +3,9 @@
 Personal project for **reverse-engineering two Chinese Android apps**:
 
 1. **警察叔叔** (`com.hzpd.jwztc`) — Hangzhou police app — for automating
-   traffic-violation reports. See `police_report/` and `FINDINGS-jwztc.md`.
+   traffic-violation reports. See `police_report/` and `docs/FINDINGS-jwztc.md`.
 2. **高德地图** (`com.autonavi.minimap`) — Amap — for calling the ride-hailing
-   (打车) AOS backend directly. See `FINDINGS.md`.
+   (打车) AOS backend directly. See `docs/FINDINGS.md`.
 
 `AGENT.md` is the working contract. All commits go straight to `main`.
 
@@ -13,57 +13,50 @@ Personal project for **reverse-engineering two Chinese Android apps**:
 
 ```
 app-bot/
-├── AGENT.md                            # agent working contract (workflow + user prefs)
-├── README.md                           # this file
-├── TODO.md                             # Amap ride-hailing pending work
-├── FINDINGS.md                         # Amap RE chronology + sign formula + status
-├── FINDINGS-jwztc.md                   # 警察叔叔 RE chronology + protection layers
+├── AGENT.md / CLAUDE.md          # agent working contract + hard rules
+├── README.md                     # this file
 │
-├── amap_client.py                      # AOS HTTP client (build / call)
-├── oracle_server.py                    # AOS crypto oracle HTTP bridge (frida-attached)
-├── mitm_addon.py                       # mitmproxy addon for jwztc traffic (no-frida path)
+├── docs/                         # RE write-ups (human-facing)
+│   ├── FINDINGS.md               #   Amap RE chronology + sign formula + status
+│   ├── FINDINGS-jwztc.md         #   警察叔叔 RE chronology + protection layers
+│   └── TODO.md                   #   Amap ride-hailing pending work
 │
-├── *.entry.js                          # frida source scripts (rebuilt via compile/)
-│   ├── oracle.entry.js                 #   AOS sign/encode oracle (RPC surface)
-│   ├── driver_fetch2.entry.js          #   Ajx3 ModuleRequest.fetch hijack
-│   ├── recon.entry.js / recon.js       #   generic MessageDigest + Cipher + okhttp tap
-│   ├── sfnet.entry.js / sftap.entry.js #   顺风车 list capture (Ajx3 + okhttp)
-│   ├── tap.entry.js / netscan.entry.js #   login-flow capture + class discovery
-│   ├── jtap.entry.js                   #   jwztc TLS plaintext tap (legacy)
-│   ├── cap.entry.js                    #   jwztc spawn-gated neuter + TLS tap (legacy)
-│   └── antidetect.entry.js             #   msaoaidsec watchdog neuter (legacy)
+├── re/                           # reverse-engineering tooling (run scripts from here)
+│   ├── amap_client.py            #   AOS HTTP client (build / call)
+│   ├── oracle_server.py          #   AOS crypto oracle HTTP bridge (frida-attached)
+│   ├── mitm_addon.py             #   mitmproxy addon for jwztc traffic (no-frida path)
+│   ├── run_*.py                  #   python frida wrappers — `python3 run_<name>.py ...`
+│   ├── *.entry.js / recon.js     #   frida source scripts (bundled via compile/)
+│   └── compile/                  #   frida-compile workspace (npm) + mgop_oracle*.entry.js v1→v6
 │
-├── run_*.py                            # python wrappers — `python3 run_<name>.py <pkg> <bundle>`
+├── police_report/                # 警察叔叔 (Hangzhou) report automation — code + report records
+│   ├── README.md                 #   full usage guide (auth, submit, OCR, …)
+│   ├── auth.py / client.py / token_provider.py / minter.py / signer.py / portal_login.py
+│   ├── resolve.py + dicts.json   #   human name → wfjb code
+│   ├── scripts/                  #   CLI (`cli.py`), cron, overlay OCR, video helpers, adb/avd
+│   ├── tests/                    #   pytest suite
+│   ├── reports/                  #   🚫 filed report.*.json records + report.example.json (real ones gitignored)
+│   ├── docs/superpowers/         #   design specs (mgop reverse, overlay OCR, …)
+│   ├── vendor/                   #   🚫 APK + rootAVD — gitignored, re-pull via scripts/
+│   └── TODO.md                   #   police-side pending work
 │
-├── compile/                            # frida-compile workspace (npm)
-│   ├── package.json / package-lock.json
-│   ├── README.md                       # explains the *.entry.js → *.bundle.js flow + MGOP variants
-│   └── mgop_oracle*.entry.js           #   jwztc MGOP-sign oracle iterations (v1 → v6)
+├── police_report_sh/             # Shanghai portal filer (playwright + API), own README / package.json
 │
-└── police_report/                      # 警察叔叔 traffic-violation report automation
-    ├── README.md                       #   full usage guide (auth, submit, OCR, …)
-    ├── auth.py / client.py / token_provider.py
-    ├── minter.py / signer.py / portal_login.py
-    ├── resolve.py                      #   human name → wfjb code (backed by dicts.json)
-    ├── report.example.json             #   filing template (real reports are gitignored)
-    ├── docs/superpowers/               #   design specs (mgop reverse, overlay OCR, …)
-    ├── scripts/                        #   CLI entry points + adb / avdmanager helpers
-    │   ├── cli.py                      #     `cli refresh|mint|login|submit|upload|...`
-    │   ├── auto_refresh.py             #     cron entry point for unattended token refresh
-    │   ├── extract_overlay.py          #     dashcam-overlay OCR (timestamp/plate/address)
-    │   └── install_cron.sh / *.sh      #     cron installer + adb/avd helpers
-    ├── tests/                          #   pytest suite
-    ├── camera/                         #   🚫 real dashcam footage — gitignored
-    ├── vendor/                         #   🚫 APK + rootAVD — gitignored, re-pull via scripts/
-    └── TODO.md                         #   police-side pending work (gsid refresh, …)
+└── camera/                       # 🚫 ALL dashcam media, shared by both filers — gitignored
+    ├── raw/                      #   original DVR footage (not managed)
+    ├── images/                   #   plate / scene stills
+    └── reported/                 #   submitted clips + images (never overwrite; suffix on collision)
 ```
+
+Data lives only in `camera/` (media) and `police_report/reports/` (JSON records);
+code directories hold no footage.
 
 Build artifacts (`*.bundle.js`, `node_modules/`, `__pycache__/`) and any local
 secrets / PII / capture files are gitignored — see `.gitignore`.
 
 ---
 
-## Ride-hailing quick start (2026-07-12 round)
+## Ride-hailing quick start (2026-07-12 round; run from `re/`)
 
 The driving test rig: **USB-attached rooted Redmi Note 8** (ginkgo, MIUI,
 Magisk 28.1, Zygisk on, frida-server 17.15.3 at `/data/local/tmp/fs17`),
@@ -96,8 +89,8 @@ Files:
 | `oracle.entry.js` + `oracle.bundle.js` | frida bundle the server hot-loads (enumerate `serverkey`/`AosEncryptor`) |
 | `amap_client.py` | pure-Python sign + wire-URL build + `requests` caller (CLI: `build` / `call`) |
 | `driver_fetch2.entry.js` + `driver_fetch2.bundle.js` | Ajx3 `ModuleRequest.fetch` hijack — RPC `ex.call({path, body, aosSign})` to dispatch through the live app's sign/session |
-| `FINDINGS.md` | chronological RE log + endpoint map + sign formula + status banner |
-| `TODO.md` | ranked pending work with retry-instructions |
+| `docs/FINDINGS.md` | chronological RE log + endpoint map + sign formula + status banner |
+| `docs/TODO.md` | ranked pending work with retry-instructions |
 | `*.entry.js` (`recon`/`sfnet`/`tap`/`tap.entry`/etc.) | earlier capture scripts — rebuild any missing `.bundle.js` via `compile/` |
 
 ---

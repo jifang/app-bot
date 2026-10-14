@@ -1,7 +1,7 @@
-# compile/ — frida-compile workspace
+# re/compile/ — frida-compile workspace
 
 This directory hosts the **frida-compile** toolchain (npm) used to bundle the
-`*.entry.js` frida scripts in the parent directory into runnable
+`*.entry.js` frida scripts in `re/` into runnable
 `*.bundle.js` files. It is the only node-side dependency in the project.
 
 ## Layout
@@ -12,7 +12,7 @@ This directory hosts the **frida-compile** toolchain (npm) used to bundle the
 | `node_modules/` | local install; **gitignored** (see root `.gitignore`) |
 | `*.entry.js` | frida sources that need `frida-java-bridge`; each gets bundled into `../<name>.bundle.js` |
 
-The entry scripts themselves live in **`compile/`** (not the project root)
+The entry scripts themselves live in **`re/compile/`** (not `re/`)
 because `package.json`'s relative `scripts.build` paths assume they are here.
 The corresponding `*.bundle.js` outputs are dropped at the project root,
 where `frida -H ... -l <name>.bundle.js` finds them — and where `*.bundle.js`

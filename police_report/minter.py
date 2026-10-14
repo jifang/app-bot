@@ -218,7 +218,7 @@ class AndroidCaptureMinter:
         """Ensure emulator, launch app, wait for auth capture, return JWT.
 
         Expectation: operator (or a companion script) has
-        `MITM_AUTH_ONLY=1 MITM_OUT=<capture_path> mitmdump -s mitm_addon.py`
+        `MITM_AUTH_ONLY=1 MITM_OUT=<capture_path> mitmdump -s re/mitm_addon.py`
         and device HTTP proxy pointing at it *before* or during wait.
         """
         self.ensure_emulator()

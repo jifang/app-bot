@@ -30,7 +30,7 @@ echo "       \$SDK/emulator/emulator -avd $AVD_NAME -no-window -no-audio -no-boo
 echo "  1. Pull official APK from USB phone + install on AVD:"
 echo "       bash police_report/scripts/pull_install_apk.sh all"
 echo "  2. Log in once on the AVD (scrcpy / Android Studio Embedded; SMS / gov SSO)."
-echo "  3. Terminal A: MITM_AUTH_ONLY=1 MITM_OUT=/tmp/re/mint.jsonl mitmdump -s mitm_addon.py -p 8080"
+echo "  3. Terminal A: MITM_AUTH_ONLY=1 MITM_OUT=/tmp/re/mint.jsonl mitmdump -s re/mitm_addon.py -p 8080"
 echo "     Point the emulator HTTP proxy at the host (Settings → Proxy, or:"
 echo "       adb -e shell settings put global http_proxy <host-ip>:8080)"
 echo "  4. Terminal B: WFJB_MINTER=android python -m police_report.scripts.cli mint --via android"

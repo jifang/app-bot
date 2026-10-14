@@ -44,7 +44,7 @@ screen*.png
 # --- police_report local assets (large binaries / real data, kept off-repo) ---
 # Real dashcam footage of traffic violations (privacy + size); report.<plate>.json
 # is the only filed artifact that goes off-repo and is already covered above.
-police_report/camera/
+camera/
 # Vendor APK + rootAVD (submodule-style, has its own .git) — pull fresh via
 # police_report/scripts/pull_install_apk.sh; only the script is checked in.
 police_report/vendor/
@@ -55,3 +55,14 @@ police_report/mpv-shot*.jpg
 # python
 __pycache__/
 *.pyc
+
+# --- data: never commit (media, filed records, caches) ---
+/camera/
+*.mp4
+*.MP4
+*.mov
+*.MOV
+police_report/reports/*
+!police_report/reports/report.example.json
+.pytest_cache/
+.DS_Store

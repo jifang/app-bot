@@ -1,0 +1,11 @@
+node_modules/
+.browser-profile/
+artifacts/
+.env
+config.json
+report.json
+report.*.json
+profile.json
+.api-session.cookies
+artifacts-api/
+__pycache__/
